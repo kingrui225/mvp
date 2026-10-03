@@ -13,3 +13,11 @@ __v0_jsx-dev-runtime.ts
 node_modules
 .next/
 .DS_Store
+
+# Instagram session — contains auth cookies, never commit
+session.json
+# Local search history — user data, never commit
+searches.json
+__pycache__/
+*.pyc
+.venv/

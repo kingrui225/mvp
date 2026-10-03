@@ -1,0 +1,12 @@
+# Instagram Search CLI – Python dependencies
+# Install with: pip install -r requirements.txt
+
+# Instagram private API client
+instagrapi>=2.1.0,<3.0.0
+
+# Browser automation for first-run session capture
+selenium>=4.20.0,<5.0.0
+webdriver-manager>=4.0.0,<5.0.0
+
+# Data validation and modelling
+pydantic>=2.0.0,<3.0.0
