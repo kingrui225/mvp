@@ -1,0 +1,13 @@
+idea generation
+- from brand context to instagram search queries to find viral formats and reels that are viral and related to the company goals
+-- when post found, analyzing 
+--- performance to followers (like to follower ratio) to find outliers and which ones performed particularly well
+--- how easy is it to replicate
+(instagram has historical based searching so the search query 'fire' will yield different results for different accounts)
+--- if its a viral format
+- AB testing exiting viral formats and scaling top performers
+- for videos that did well and are good and are hard to replicate, look for why they performed well and try and extract the format or hook or whatever to tailor it toward personal brand
+
+post creation
+- transcribe the video
+- tailor the CTA and play around with where the CTA happens at
