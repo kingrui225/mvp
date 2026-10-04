@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 
 # ---------------------------------------------------------------------------
 # Pydantic models
@@ -36,6 +36,8 @@ from pydantic import BaseModel, field_validator
 class CookieEntry(BaseModel):
     """Represents a single browser cookie."""
 
+    model_config = ConfigDict(extra="allow")
+
     name: str
     value: str
     domain: str = ""
@@ -43,9 +45,6 @@ class CookieEntry(BaseModel):
     secure: bool = False
     http_only: bool = False
     expiry: Optional[int] = None
-
-    class Config:
-        extra = "allow"
 
 
 class SessionBundle(BaseModel):
@@ -63,18 +62,26 @@ class SessionBundle(BaseModel):
         return v or datetime.now(timezone.utc).isoformat()
 
 
-class SearchResult(BaseModel):
-    """Normalised representation of a single search hit."""
+MEDIA_TYPE_MAP = {1: "photo", 2: "video", 8: "carousel"}
+
+
+class PostResult(BaseModel):
+    """Normalised representation of a single Instagram post / reel / carousel."""
 
     pk: Optional[str] = None
+    code: Optional[str] = None          # shortcode → instagram.com/p/{code}/
+    url: Optional[str] = None
+    media_type: Optional[str] = None    # "photo" | "video" | "carousel"
+    thumbnail_url: Optional[str] = None
+    video_url: Optional[str] = None
+    caption: Optional[str] = None
+    like_count: Optional[int] = None
+    comment_count: Optional[int] = None
+    view_count: Optional[int] = None    # video / reel play count
+    taken_at: Optional[str] = None      # ISO timestamp
     username: Optional[str] = None
-    name: Optional[str] = None
-    tag_name: Optional[str] = None
-    full_name: Optional[str] = None
-    is_private: Optional[bool] = None
+    user_pk: Optional[str] = None
     is_verified: Optional[bool] = None
-    profile_pic_url: Optional[str] = None
-    follower_count: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -104,11 +111,12 @@ def load_session() -> Optional[SessionBundle]:
         return None
 
 
-def save_session(bundle: SessionBundle) -> None:
+def save_session(bundle: SessionBundle, *, verbose: bool = True) -> None:
     SESSION_FILE.write_text(
         bundle.model_dump_json(indent=2), encoding="utf-8"
     )
-    print(f"[info] Session saved to {SESSION_FILE}")
+    if verbose:
+        print(f"[info] Session saved to {SESSION_FILE}")
 
 
 def delete_session() -> None:
@@ -236,10 +244,11 @@ def build_client(bundle: SessionBundle):
     return cl
 
 
-def persist_device_settings(cl, bundle: SessionBundle) -> SessionBundle:
+def persist_device_settings(cl, bundle: SessionBundle, *, verbose: bool = False) -> SessionBundle:
     """
-    After building the client, persist its generated device settings back into
-    the bundle so subsequent runs reuse the same device fingerprint.
+    Write instagrapi's generated device settings (UUIDs, device_id, etc.)
+    back into the bundle so the same fingerprint is reused on the next run.
+    Only logs when verbose=True (i.e. on first-time save after browser login).
     """
     try:
         settings = cl.get_settings()
@@ -247,124 +256,203 @@ def persist_device_settings(cl, bundle: SessionBundle) -> SessionBundle:
         settings.pop("cookies", None)
         settings.pop("user_agent", None)
         bundle.instagrapi_settings.update(settings)
-        save_session(bundle)
+        SESSION_FILE.write_text(bundle.model_dump_json(indent=2), encoding="utf-8")
+        if verbose:
+            print(f"[info] Session saved to {SESSION_FILE}")
     except Exception as exc:
         print(f"[warn] Could not persist device settings: {exc}")
     return bundle
 
 
+def _session_cookie_expired(bundle: SessionBundle) -> bool:
+    """
+    Fast local check: return True if the sessionid cookie's expiry timestamp
+    is in the past.  If no expiry is recorded we assume it's still live.
+    """
+    now = int(time.time())
+    for cookie in bundle.cookies:
+        if cookie.name == "sessionid" and cookie.expiry is not None:
+            if cookie.expiry < now:
+                return True
+    return False
+
+
 def health_check(cl) -> bool:
     """
-    Validate the session with a low-friction authenticated request.
-    Returns True if valid, False if the session has expired.
+    Validate the session with a minimal authenticated request.
+    Uses /accounts/current_user/ (account_info) which is the lightest
+    authenticated endpoint instagrapi exposes — much lighter than a feed fetch
+    and less likely to trigger rate-limit or anti-bot responses.
+    Returns True if valid, False if the session has expired or been revoked.
     """
     from instagrapi.exceptions import ChallengeRequired, LoginRequired
 
     try:
-        # `get_timeline_feed` is among the lightest authenticated calls and
-        # is used internally by instagrapi to verify sessions.
-        cl.get_timeline_feed()
+        cl.account_info()
         return True
     except (LoginRequired, ChallengeRequired):
         return False
     except Exception as exc:
-        # Network or other transient errors are not treated as session invalidity.
-        print(f"[warn] Health check encountered an unexpected error: {exc}")
-        return True  # Optimistic—don't nuke the session on transient failures.
+        # Treat transient network / server errors as "session probably fine".
+        print(f"[warn] Health check hit a transient error (will continue): {exc}")
+        return True
 
 
 def get_authenticated_client():
     """
     Return an authenticated instagrapi Client.
-    - Loads session.json if present and valid.
-    - Falls back to browser-based login when necessary.
-    - Persists updated device settings after successful auth.
+
+    Decision tree:
+      1. No session.json              → browser login
+      2. sessionid cookie expired     → browser login (local check, no network)
+      3. Network health-check fails   → browser login
+      4. All good                     → reuse session (no browser)
+
+    Device settings (UUIDs, etc.) are written back to session.json after every
+    successful load so the same fingerprint is reused across runs.
     """
     bundle = load_session()
 
     if bundle is not None:
-        print("[info] Found existing session. Verifying…")
-        cl = build_client(bundle)
-        if health_check(cl):
-            print("[info] Session is valid. Proceeding without browser.\n")
-            bundle = persist_device_settings(cl, bundle)
-            return cl
-        else:
-            print("[warn] Session expired or invalid. Re-authenticating…")
+        # ── Step 1: local expiry gate (free, no network) ──────────────────
+        if _session_cookie_expired(bundle):
+            print("[warn] sessionid cookie has expired. Re-authenticating…")
             delete_session()
             bundle = None
+        else:
+            # ── Step 2: lightweight network verification ───────────────────
+            print("[info] Found existing session. Verifying…")
+            cl = build_client(bundle)
+            if health_check(cl):
+                print("[info] Session is valid. Proceeding without browser.\n")
+                # Persist any updated device settings quietly (no extra log).
+                persist_device_settings(cl, bundle, verbose=False)
+                return cl
+            else:
+                print("[warn] Session rejected by Instagram. Re-authenticating…")
+                delete_session()
+                bundle = None
 
-    # No valid session—run browser login.
+    # ── No valid session: open browser once and capture cookies ───────────
     bundle = browser_login()
     cl = build_client(bundle)
-    bundle = persist_device_settings(cl, bundle)
-    save_session(bundle)
+    persist_device_settings(cl, bundle, verbose=True)
     return cl
 
 
 # ---------------------------------------------------------------------------
-# Search normalization helpers
+# Post normalisation helpers
 # ---------------------------------------------------------------------------
 
 def _str(val) -> Optional[str]:
     return str(val) if val is not None else None
 
 
-def _normalize_user(u) -> SearchResult:
-    """Normalize an instagrapi UserShort / User object."""
-    pic = getattr(u, "profile_pic_url", None)
-    return SearchResult(
-        pk=_str(getattr(u, "pk", None)),
-        username=getattr(u, "username", None),
-        full_name=getattr(u, "full_name", None),
-        is_private=getattr(u, "is_private", None),
-        is_verified=getattr(u, "is_verified", None),
-        profile_pic_url=str(pic) if pic else None,
-        follower_count=getattr(u, "follower_count", None),
+def _normalize_media(m) -> PostResult:
+    """Normalize an instagrapi Media object into a PostResult."""
+    pk = _str(getattr(m, "pk", None))
+    code = getattr(m, "code", None)
+    media_type_int = getattr(m, "media_type", None)
+    media_type = MEDIA_TYPE_MAP.get(media_type_int, "photo") if media_type_int else None
+
+    thumb = getattr(m, "thumbnail_url", None)
+    vid = getattr(m, "video_url", None)
+
+    user = getattr(m, "user", None)
+    username = getattr(user, "username", None) if user else None
+    user_pk = _str(getattr(user, "pk", None)) if user else None
+    is_verified = getattr(user, "is_verified", None) if user else None
+
+    taken_at = getattr(m, "taken_at", None)
+    taken_at_str = taken_at.isoformat() if taken_at and hasattr(taken_at, "isoformat") else _str(taken_at)
+
+    return PostResult(
+        pk=pk,
+        code=code,
+        url=f"https://www.instagram.com/p/{code}/" if code else None,
+        media_type=media_type,
+        thumbnail_url=str(thumb) if thumb else None,
+        video_url=str(vid) if vid else None,
+        caption=getattr(m, "caption_text", None),
+        like_count=getattr(m, "like_count", None),
+        comment_count=getattr(m, "comment_count", None),
+        view_count=getattr(m, "view_count", None) or getattr(m, "play_count", None),
+        taken_at=taken_at_str,
+        username=username,
+        user_pk=user_pk,
+        is_verified=is_verified,
     )
 
 
-def _normalize_hashtag(h) -> SearchResult:
-    """Normalize an instagrapi Hashtag object."""
-    return SearchResult(
-        pk=_str(getattr(h, "id", None)),
-        tag_name=getattr(h, "name", None),
-        name=getattr(h, "name", None),
-    )
+def _normalize_reel_node(node: dict) -> Optional[PostResult]:
+    """
+    Normalize a raw reel node dict returned by fbsearch_reels_v2.
+    The structure varies; we extract best-effort fields.
+    """
+    try:
+        media = node.get("media", node)
+        pk = _str(media.get("pk") or media.get("id"))
+        code = media.get("code")
+        user = media.get("user") or {}
+        thumb_candidates = (
+            media.get("image_versions2", {}).get("candidates", [{}])
+        )
+        thumb = thumb_candidates[0].get("url") if thumb_candidates else None
+        vid_versions = media.get("video_versions", [{}])
+        vid = vid_versions[0].get("url") if vid_versions else None
+        caption_raw = media.get("caption") or {}
+        caption = caption_raw.get("text") if isinstance(caption_raw, dict) else caption_raw
 
-
-def _normalize_place(p) -> SearchResult:
-    """Normalize an instagrapi Location / Place object."""
-    return SearchResult(
-        pk=_str(getattr(p, "pk", None) or getattr(p, "facebook_places_id", None)),
-        name=getattr(p, "name", None),
-    )
+        return PostResult(
+            pk=pk,
+            code=code,
+            url=f"https://www.instagram.com/p/{code}/" if code else None,
+            media_type="video",
+            thumbnail_url=thumb,
+            video_url=vid,
+            caption=caption,
+            like_count=media.get("like_count"),
+            comment_count=media.get("comment_count"),
+            view_count=media.get("view_count") or media.get("play_count"),
+            username=user.get("username"),
+            user_pk=_str(user.get("pk")),
+            is_verified=user.get("is_verified"),
+        )
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
 # Primary search function
 # ---------------------------------------------------------------------------
 
-VALID_SEARCH_TYPES = ("top", "user", "hashtag", "place")
+VALID_SEARCH_TYPES = ("top", "reel", "hashtag", "place")
+DEFAULT_LIMIT = 100
 
 
 def search_instagram(
     cl,
     query: str,
     search_type: str = "top",
+    limit: int = DEFAULT_LIMIT,
 ) -> Dict[str, Any]:
     """
-    Execute a personalized Instagram search using the authenticated Client.
+    Execute a personalized Instagram post search using the authenticated Client.
 
     Parameters
     ----------
     cl          : Authenticated instagrapi.Client instance.
     query       : Search query string.
-    search_type : One of "top", "user", "hashtag", "place".
+    search_type : One of "top", "reel", "hashtag", "place".
+                  - top      : keyword post search (photos + videos + carousels)
+                  - reel     : reels-specific search
+                  - hashtag  : top posts filed under the best-matching hashtag
+                  - place    : location search (returns place names, not posts)
+    limit       : Maximum number of results to return (default 100).
 
     Returns
     -------
-    dict with keys: query, search_type, results (list of normalized hits).
+    dict with keys: query, search_type, limit, results.
     """
     from instagrapi.exceptions import ChallengeRequired, LoginRequired
 
@@ -374,32 +462,49 @@ def search_instagram(
             f"Choose from: {', '.join(VALID_SEARCH_TYPES)}"
         )
 
-    results: List[SearchResult] = []
+    if limit < 1:
+        limit = DEFAULT_LIMIT
+
+    results: List[PostResult] = []
 
     try:
-        if search_type == "user":
-            raw = cl.search_users(query)
-            results = [_normalize_user(u) for u in raw]
+        if search_type == "top":
+            # Direct keyword → post search; returns photos, videos, carousels.
+            raw = cl.media_search(query, amount=limit)
+            results = [_normalize_media(m) for m in raw[:limit]]
+
+        elif search_type == "reel":
+            # Reels-specific search via fbsearch_reels_v2.
+            raw_dict = cl.fbsearch_reels_v2(query)
+            nodes = (
+                raw_dict.get("reels_media", [])
+                or raw_dict.get("items", [])
+                or raw_dict.get("medias", [])
+                or []
+            )
+            for node in nodes[:limit]:
+                normalized = _normalize_reel_node(node)
+                if normalized:
+                    results.append(normalized)
 
         elif search_type == "hashtag":
-            raw = cl.search_hashtags(query)
-            results = [_normalize_hashtag(h) for h in raw]
+            # Find matching hashtags, then pull top posts for the best one.
+            tags = cl.search_hashtags(query)
+            if not tags:
+                print(f"[warn] No hashtags found for '{query}'")
+            else:
+                top_tag = tags[0].name
+                print(f"[info] Using hashtag #{top_tag}")
+                raw = cl.hashtag_medias_top(top_tag, amount=limit)
+                results = [_normalize_media(m) for m in raw[:limit]]
 
         elif search_type == "place":
+            # Place search — returns location names (not posts).
+            from instagrapi.types import Location
             raw = cl.fbsearch_places(query)
-            results = [_normalize_place(p) for p in raw]
-
-        else:  # "top" — hit Instagram's personalized topsearch private endpoint
-            raw = cl.search_users(query)
-            users = [_normalize_user(u) for u in raw]
-
-            try:
-                hashtags = [_normalize_hashtag(h) for h in cl.search_hashtags(query)]
-            except Exception:
-                hashtags = []
-
-            # Interleave: users first (personalized graph), then hashtags.
-            results = users + hashtags
+            for p in raw[:limit]:
+                pk = _str(getattr(p, "pk", None) or getattr(p, "facebook_places_id", None))
+                results.append(PostResult(pk=pk, caption=getattr(p, "name", None), media_type="place"))
 
     except LoginRequired:
         print(
@@ -420,6 +525,7 @@ def search_instagram(
     return {
         "query": query,
         "search_type": search_type,
+        "limit": limit,
         "results": [r.model_dump(exclude_none=True) for r in results],
     }
 
@@ -455,9 +561,18 @@ Examples:
         choices=VALID_SEARCH_TYPES,
         default="top",
         help=(
-            "Search mode: top (default), user, hashtag, or place. "
-            "'top' blends personalized users and hashtags."
+            "Search mode: top (default) = keyword post search, "
+            "reel = reels only, hashtag = top posts under best-matching tag, "
+            "place = location names."
         ),
+    )
+    parser.add_argument(
+        "--limit",
+        dest="limit",
+        type=int,
+        default=DEFAULT_LIMIT,
+        metavar="N",
+        help=f"Maximum number of results to return (default: {DEFAULT_LIMIT}).",
     )
     parser.add_argument(
         "--reset-session",
@@ -476,7 +591,7 @@ def main() -> None:
         print("[info] Session reset. A fresh browser login will be triggered.\n")
 
     cl = get_authenticated_client()
-    output = search_instagram(cl, query=args.query, search_type=args.search_type)
+    output = search_instagram(cl, query=args.query, search_type=args.search_type, limit=args.limit)
 
     print(json.dumps(output, indent=2, default=str))
 

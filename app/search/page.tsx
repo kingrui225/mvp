@@ -1,34 +1,40 @@
 'use client'
 
 import {
-  CheckCircle,
   Clock,
+  Film,
   Hash,
-  Lock,
+  Heart,
+  Images,
   MapPin,
+  MessageCircle,
+  Play,
   Search,
   Sparkles,
   Trash2,
-  User,
-  Users,
   X,
 } from 'lucide-react'
 import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type SearchType = 'top' | 'user' | 'hashtag' | 'place'
+type SearchType = 'top' | 'reel' | 'hashtag' | 'place'
 
-interface SearchResult {
+interface PostResult {
   pk?: string
+  code?: string
+  url?: string
+  media_type?: 'photo' | 'video' | 'carousel' | 'place'
+  thumbnail_url?: string
+  video_url?: string
+  caption?: string
+  like_count?: number
+  comment_count?: number
+  view_count?: number
+  taken_at?: string
   username?: string
-  name?: string
-  tag_name?: string
-  full_name?: string
-  is_private?: boolean
+  user_pk?: string
   is_verified?: boolean
-  profile_pic_url?: string
-  follower_count?: number
 }
 
 interface SearchRecord {
@@ -36,41 +42,25 @@ interface SearchRecord {
   timestamp: string
   query: string
   search_type: SearchType
-  results: SearchResult[]
+  limit: number
+  results: PostResult[]
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const SEARCH_TYPES: { value: SearchType; label: string; icon: typeof Search }[] = [
-  { value: 'top', label: 'Top', icon: Sparkles },
-  { value: 'user', label: 'Users', icon: User },
-  { value: 'hashtag', label: 'Tags', icon: Hash },
+  { value: 'top', label: 'Top Posts', icon: Sparkles },
+  { value: 'reel', label: 'Reels', icon: Film },
+  { value: 'hashtag', label: 'Hashtag', icon: Hash },
   { value: 'place', label: 'Places', icon: MapPin },
 ]
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function displayName(r: SearchResult): string {
-  return r.username ?? r.tag_name ?? r.name ?? r.pk ?? '—'
-}
-
-function subline(r: SearchResult): string {
-  const parts: string[] = []
-  if (r.full_name && r.full_name !== displayName(r)) parts.push(r.full_name)
-  if (r.follower_count != null)
-    parts.push(`${formatCount(r.follower_count)} followers`)
-  return parts.join(' · ')
-}
-
 function formatCount(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
   return String(n)
-}
-
-function initials(r: SearchResult): string {
-  const label = displayName(r)
-  return label.replace('@', '').slice(0, 2).toUpperCase()
 }
 
 function timeAgo(iso: string): string {
@@ -83,65 +73,120 @@ function timeAgo(iso: string): string {
   return `${Math.floor(hrs / 24)}d ago`
 }
 
+function truncateCaption(text: string, max = 100): string {
+  if (!text) return ''
+  return text.length > max ? text.slice(0, max).trimEnd() + '…' : text
+}
+
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
-function Avatar({ result }: { result: SearchResult }) {
-  const [imgError, setImgError] = useState(false)
-  if (result.profile_pic_url && !imgError) {
-    return (
-      // eslint-disable-next-line @next/next/no-img-element
-      <img
-        src={result.profile_pic_url}
-        alt=""
-        onError={() => setImgError(true)}
-        className="size-10 rounded-full object-cover"
-      />
-    )
+function MediaTypeBadge({ type }: { type?: string }) {
+  if (!type || type === 'photo') return null
+  const map: Record<string, { label: string; Icon: typeof Play }> = {
+    video:    { label: 'Reel', Icon: Play },
+    carousel: { label: 'Album', Icon: Images },
+    place:    { label: 'Place', Icon: MapPin },
   }
+  const entry = map[type]
+  if (!entry) return null
+  const { label, Icon } = entry
   return (
-    <div className="flex size-10 shrink-0 items-center justify-center rounded-full bg-[#17202b] text-[11px] font-bold text-white">
-      {initials(result)}
-    </div>
+    <span className="flex items-center gap-1 rounded-md bg-black/50 px-1.5 py-0.5 text-[10px] font-semibold text-white backdrop-blur-sm">
+      <Icon className="size-2.5" />
+      {label}
+    </span>
   )
 }
 
-function ResultCard({ result }: { result: SearchResult }) {
-  const label = displayName(result)
-  const sub = subline(result)
+function PostCard({ post }: { post: PostResult }) {
+  const [imgError, setImgError] = useState(false)
+  const href = post.url ?? (post.code ? `https://www.instagram.com/p/${post.code}/` : '#')
 
   return (
-    <div className="flex items-center gap-3 rounded-xl border border-[#e8eaed] bg-white px-4 py-3 transition hover:border-[#c8cdd3] hover:shadow-[0_2px_8px_rgba(23,32,43,0.07)]">
-      <Avatar result={result} />
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-1.5 truncate">
-          <span className="truncate text-sm font-semibold text-[#17202b]">
-            {result.username ? `@${result.username}` : result.tag_name ? `#${result.tag_name}` : label}
-          </span>
-          {result.is_verified && (
-            <CheckCircle aria-label="Verified" className="size-3.5 shrink-0 text-[#3897f0]" />
-          )}
-          {result.is_private && (
-            <Lock aria-label="Private" className="size-3.5 shrink-0 text-[#8994a1]" />
-          )}
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="group flex flex-col overflow-hidden rounded-2xl border border-[#e8eaed] bg-white transition hover:-translate-y-0.5 hover:border-[#c8cdd3] hover:shadow-[0_4px_16px_rgba(23,32,43,0.10)]"
+    >
+      {/* Thumbnail */}
+      <div className="relative aspect-square w-full overflow-hidden bg-[#f0f2f5]">
+        {post.thumbnail_url && !imgError ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={post.thumbnail_url}
+            alt={post.caption ?? ''}
+            onError={() => setImgError(true)}
+            className="size-full object-cover transition group-hover:scale-[1.02]"
+          />
+        ) : (
+          <div className="flex size-full items-center justify-center text-[#c8cdd3]">
+            <Sparkles className="size-8" />
+          </div>
+        )}
+        {/* Media type badge */}
+        <div className="absolute right-2 top-2">
+          <MediaTypeBadge type={post.media_type} />
         </div>
-        {sub && (
-          <p className="mt-0.5 truncate text-xs text-[#7a8593]">{sub}</p>
+        {/* Reel play icon overlay */}
+        {post.media_type === 'video' && (
+          <div className="absolute inset-0 flex items-center justify-center opacity-0 transition group-hover:opacity-100">
+            <div className="flex size-10 items-center justify-center rounded-full bg-black/40 backdrop-blur-sm">
+              <Play className="size-5 fill-white text-white" />
+            </div>
+          </div>
         )}
       </div>
-      {result.follower_count != null && (
-        <div className="flex shrink-0 items-center gap-1 text-xs text-[#8994a1]">
-          <Users className="size-3.5" />
-          <span>{formatCount(result.follower_count)}</span>
+
+      {/* Meta */}
+      <div className="flex flex-col gap-2 p-3">
+        {/* Stats row */}
+        <div className="flex items-center gap-3 text-xs text-[#7a8593]">
+          {post.like_count != null && (
+            <span className="flex items-center gap-1">
+              <Heart className="size-3.5" />
+              {formatCount(post.like_count)}
+            </span>
+          )}
+          {post.comment_count != null && (
+            <span className="flex items-center gap-1">
+              <MessageCircle className="size-3.5" />
+              {formatCount(post.comment_count)}
+            </span>
+          )}
+          {post.view_count != null && (
+            <span className="flex items-center gap-1">
+              <Play className="size-3.5" />
+              {formatCount(post.view_count)}
+            </span>
+          )}
+          {post.taken_at && (
+            <span className="ml-auto shrink-0">{timeAgo(post.taken_at)}</span>
+          )}
         </div>
-      )}
-    </div>
+
+        {/* Username */}
+        {post.username && (
+          <p className="truncate text-[11px] font-semibold text-[#273442]">
+            @{post.username}
+          </p>
+        )}
+
+        {/* Caption */}
+        {post.caption && (
+          <p className="text-[11px] leading-4 text-[#657180]">
+            {truncateCaption(post.caption)}
+          </p>
+        )}
+      </div>
+    </a>
   )
 }
 
 function ErrorBanner({ message, onDismiss }: { message: string; onDismiss: () => void }) {
   return (
     <div className="flex items-start gap-3 rounded-xl border border-[#f5c6c6] bg-[#fff5f5] px-4 py-3 text-sm text-[#9b2c2c]">
-      <span className="flex-1">{message}</span>
+      <span className="flex-1 font-mono text-xs">{message}</span>
       <button onClick={onDismiss} className="shrink-0 text-[#9b2c2c]/60 hover:text-[#9b2c2c]">
         <X className="size-4" />
       </button>
@@ -154,13 +199,13 @@ function ErrorBanner({ message, onDismiss }: { message: string; onDismiss: () =>
 export default function SearchPage() {
   const [query, setQuery] = useState('')
   const [searchType, setSearchType] = useState<SearchType>('top')
+  const [limit, setLimit] = useState(100)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [activeRecord, setActiveRecord] = useState<SearchRecord | null>(null)
   const [history, setHistory] = useState<SearchRecord[]>([])
   const inputRef = useRef<HTMLInputElement>(null)
 
-  // Load history on mount
   useEffect(() => {
     fetch('/api/history')
       .then((r) => r.json())
@@ -176,15 +221,13 @@ export default function SearchPage() {
       e?.preventDefault()
       const q = query.trim()
       if (!q || loading) return
-
       setLoading(true)
       setError(null)
-
       try {
         const res = await fetch('/api/search', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query: q, search_type: searchType }),
+          body: JSON.stringify({ query: q, search_type: searchType, limit }),
         })
         const data = await res.json()
         if (!res.ok) {
@@ -200,7 +243,7 @@ export default function SearchPage() {
         setLoading(false)
       }
     },
-    [query, searchType, loading],
+    [query, searchType, limit, loading],
   )
 
   async function deleteRecord(id: string) {
@@ -212,12 +255,12 @@ export default function SearchPage() {
     })
   }
 
-  const results = activeRecord?.results ?? []
+  const posts = activeRecord?.results ?? []
 
   return (
     <div className="flex h-screen overflow-hidden bg-[#f5f6f8] text-[#17202b]">
-      {/* ── Sidebar ───────────────────────────────────────── */}
-      <aside className="flex w-64 shrink-0 flex-col border-r border-[#e1e5ea] bg-white">
+      {/* ── Sidebar ─────────────────────────────────────────────────── */}
+      <aside className="flex w-60 shrink-0 flex-col border-r border-[#e1e5ea] bg-white">
         {/* Logo */}
         <div className="flex items-center gap-2.5 border-b border-[#edf0f3] px-5 py-4">
           <div className="flex size-7 items-center justify-center rounded-lg bg-[#17202b] text-white">
@@ -246,49 +289,44 @@ export default function SearchPage() {
           )}
         </div>
 
-        {/* History list */}
         <div className="flex-1 overflow-y-auto">
           {history.length === 0 ? (
             <p className="px-5 py-3 text-xs text-[#a3acb7]">No searches yet.</p>
           ) : (
-            history.map((record) => (
-              <div
-                key={record.id}
-                onClick={() => setActiveRecord(record)}
-                className={`group flex cursor-pointer items-start gap-2.5 px-4 py-3 transition ${
-                  activeRecord?.id === record.id
-                    ? 'bg-[#f0f2f5]'
-                    : 'hover:bg-[#f7f8fa]'
-                }`}
-              >
-                <div className="mt-0.5 shrink-0 text-[#8994a1]">
-                  {record.search_type === 'user' && <User className="size-3.5" />}
-                  {record.search_type === 'hashtag' && <Hash className="size-3.5" />}
-                  {record.search_type === 'place' && <MapPin className="size-3.5" />}
-                  {record.search_type === 'top' && <Sparkles className="size-3.5" />}
-                </div>
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-xs font-semibold text-[#273442]">{record.query}</p>
-                  <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-[#a3acb7]">
-                    <Clock className="size-3" />
-                    <span>{timeAgo(record.timestamp)}</span>
-                    <span>·</span>
-                    <span>{record.results.length} results</span>
-                  </div>
-                </div>
-                <button
-                  onClick={(e) => { e.stopPropagation(); deleteRecord(record.id) }}
-                  className="shrink-0 text-transparent transition group-hover:text-[#b0b8c1] hover:!text-[#657180]"
+            history.map((record) => {
+              const TypeIcon = SEARCH_TYPES.find((t) => t.value === record.search_type)?.icon ?? Sparkles
+              return (
+                <div
+                  key={record.id}
+                  onClick={() => setActiveRecord(record)}
+                  className={`group flex cursor-pointer items-start gap-2.5 px-4 py-3 transition ${
+                    activeRecord?.id === record.id ? 'bg-[#f0f2f5]' : 'hover:bg-[#f7f8fa]'
+                  }`}
                 >
-                  <X className="size-3.5" />
-                </button>
-              </div>
-            ))
+                  <TypeIcon className="mt-0.5 size-3.5 shrink-0 text-[#8994a1]" />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-xs font-semibold text-[#273442]">{record.query}</p>
+                    <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-[#a3acb7]">
+                      <Clock className="size-3" />
+                      <span>{timeAgo(record.timestamp)}</span>
+                      <span>·</span>
+                      <span>{record.results.length} posts</span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); deleteRecord(record.id) }}
+                    className="shrink-0 text-transparent transition group-hover:text-[#b0b8c1] hover:!text-[#657180]"
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                </div>
+              )
+            })
           )}
         </div>
       </aside>
 
-      {/* ── Main area ─────────────────────────────────────── */}
+      {/* ── Main ────────────────────────────────────────────────────── */}
       <main className="flex min-w-0 flex-1 flex-col">
         {/* Search bar */}
         <form
@@ -321,9 +359,31 @@ export default function SearchPage() {
               ref={inputRef}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search Instagram…"
+              placeholder={
+                searchType === 'hashtag' ? 'Search by hashtag…' :
+                searchType === 'place'   ? 'Search by location…' :
+                searchType === 'reel'    ? 'Search reels…' :
+                'Search posts…'
+              }
               className="w-full rounded-xl border border-[#d9dfe6] bg-[#f8f9fb] py-2.5 pl-9 pr-4 text-sm text-[#17202b] outline-none transition placeholder:text-[#8994a1] focus:border-[#17202b] focus:bg-white focus:ring-2 focus:ring-[#17202b]/10"
             />
+          </div>
+
+          {/* Limit picker */}
+          <div className="flex shrink-0 items-center gap-1.5">
+            <label htmlFor="limit-select" className="text-xs font-medium text-[#8994a1] whitespace-nowrap">
+              Top
+            </label>
+            <select
+              id="limit-select"
+              value={limit}
+              onChange={(e) => setLimit(Number(e.target.value))}
+              className="cursor-pointer appearance-none rounded-lg border border-[#d9dfe6] bg-[#f8f9fb] py-2 pl-2.5 pr-6 text-xs font-semibold text-[#273442] outline-none transition focus:border-[#17202b] focus:ring-2 focus:ring-[#17202b]/10"
+            >
+              {[10, 25, 50, 100, 200, 500].map((n) => (
+                <option key={n} value={n}>{n}</option>
+              ))}
+            </select>
           </div>
 
           {/* Submit */}
@@ -346,7 +406,7 @@ export default function SearchPage() {
           </button>
         </form>
 
-        {/* Results area */}
+        {/* Results */}
         <div className="flex-1 overflow-y-auto px-6 py-6">
           {error && (
             <div className="mb-4">
@@ -354,7 +414,7 @@ export default function SearchPage() {
             </div>
           )}
 
-          {/* Loading state */}
+          {/* Loading */}
           {loading && (
             <div className="flex flex-col items-center gap-3 py-24 text-center">
               <div className="relative flex size-14 items-center justify-center rounded-full bg-[#eef1f5]">
@@ -366,50 +426,49 @@ export default function SearchPage() {
             </div>
           )}
 
-          {/* Results */}
+          {/* Results grid */}
           {!loading && activeRecord && (
             <>
-              {/* Header */}
               <div className="mb-4 flex items-center justify-between">
                 <div>
-                  <h2 className="text-base font-semibold tracking-tight text-[#17202b]">
+                  <h2 className="text-base font-semibold tracking-tight">
                     &ldquo;{activeRecord.query}&rdquo;
                   </h2>
                   <p className="mt-0.5 text-xs text-[#7a8593]">
-                    {results.length} result{results.length !== 1 ? 's' : ''} ·{' '}
-                    {activeRecord.search_type} search ·{' '}
+                    {posts.length} of {activeRecord.limit} requested ·{' '}
+                    {activeRecord.search_type} ·{' '}
                     {timeAgo(activeRecord.timestamp)}
                   </p>
                 </div>
               </div>
 
-              {results.length === 0 ? (
+              {posts.length === 0 ? (
                 <div className="rounded-2xl border border-dashed border-[#d9dfe6] bg-white px-6 py-16 text-center">
                   <Search className="mx-auto mb-3 size-8 text-[#c8cdd3]" />
-                  <p className="text-sm font-medium text-[#657180]">No results found.</p>
+                  <p className="text-sm font-medium text-[#657180]">No posts found.</p>
                   <p className="mt-1 text-xs text-[#a3acb7]">Try a different query or search type.</p>
                 </div>
               ) : (
-                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                  {results.map((r, i) => (
-                    <ResultCard key={r.pk ?? i} result={r} />
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+                  {posts.map((post, i) => (
+                    <PostCard key={post.pk ?? post.code ?? i} post={post} />
                   ))}
                 </div>
               )}
             </>
           )}
 
-          {/* Empty state — no search run yet */}
+          {/* Empty state */}
           {!loading && !activeRecord && !error && (
             <div className="flex flex-col items-center gap-3 py-28 text-center">
               <div className="flex size-14 items-center justify-center rounded-2xl bg-[#eef1f5]">
                 <Search className="size-7 text-[#c8cdd3]" />
               </div>
               <p className="text-sm font-medium text-[#657180]">
-                Enter a query above to search Instagram.
+                Search for posts, reels, or carousels.
               </p>
               <p className="text-xs text-[#a3acb7]">
-                On first run, a browser window will open so you can log in.
+                On first run a browser opens so you can log in to Instagram.
               </p>
             </div>
           )}

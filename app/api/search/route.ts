@@ -8,26 +8,32 @@ const REPO_ROOT = path.resolve(process.cwd())
 const SEARCHES_FILE = path.join(REPO_ROOT, 'searches.json')
 const SCRIPT_PATH = path.join(REPO_ROOT, 'instagram_search.py')
 
-export type SearchType = 'top' | 'user' | 'hashtag' | 'place'
+export type SearchType = 'top' | 'reel' | 'hashtag' | 'place'
 
 export interface SearchRecord {
   id: string
   timestamp: string
   query: string
   search_type: SearchType
-  results: SearchResult[]
+  limit: number
+  results: PostResult[]
 }
 
-export interface SearchResult {
+export interface PostResult {
   pk?: string
+  code?: string
+  url?: string
+  media_type?: 'photo' | 'video' | 'carousel' | 'place'
+  thumbnail_url?: string
+  video_url?: string
+  caption?: string
+  like_count?: number
+  comment_count?: number
+  view_count?: number
+  taken_at?: string
   username?: string
-  name?: string
-  tag_name?: string
-  full_name?: string
-  is_private?: boolean
+  user_pk?: string
   is_verified?: boolean
-  profile_pic_url?: string
-  follower_count?: number
 }
 
 function readHistory(): SearchRecord[] {
@@ -46,9 +52,11 @@ function appendRecord(record: SearchRecord): void {
   fs.writeFileSync(SEARCHES_FILE, JSON.stringify(history, null, 2), 'utf-8')
 }
 
-function runPythonSearch(query: string, searchType: SearchType): Promise<SearchRecord> {
+const DEFAULT_LIMIT = 100
+
+function runPythonSearch(query: string, searchType: SearchType, limit: number): Promise<SearchRecord> {
   return new Promise((resolve, reject) => {
-    const args = [SCRIPT_PATH, query, '--type', searchType]
+    const args = [SCRIPT_PATH, query, '--type', searchType, '--limit', String(limit)]
     const proc = spawn('python3', args, { cwd: REPO_ROOT })
 
     let stdout = ''
@@ -59,20 +67,22 @@ function runPythonSearch(query: string, searchType: SearchType): Promise<SearchR
 
     proc.on('close', (code) => {
       if (code !== 0) {
-        // Surface the Python error clearly.
-        return reject(new Error(stderr || `instagram_search.py exited with code ${code}`))
+        // Collect all output for a useful error message.
+        const detail = [stderr, stdout].filter(Boolean).join('\n').trim()
+        return reject(new Error(detail || `instagram_search.py exited with code ${code}`))
       }
       try {
-        // The script may emit log lines to stdout before the JSON object.
+        // The script emits log lines to stdout before the JSON object.
         // Find the first '{' to locate the JSON payload.
         const jsonStart = stdout.indexOf('{')
-        if (jsonStart === -1) throw new Error('No JSON found in script output')
+        if (jsonStart === -1) throw new Error(`No JSON in script output:\n${stdout}\n${stderr}`)
         const parsed = JSON.parse(stdout.slice(jsonStart))
         const record: SearchRecord = {
           id: randomUUID(),
           timestamp: new Date().toISOString(),
           query: parsed.query ?? query,
           search_type: (parsed.search_type ?? searchType) as SearchType,
+          limit: parsed.limit ?? limit,
           results: parsed.results ?? [],
         }
         resolve(record)
@@ -86,7 +96,7 @@ function runPythonSearch(query: string, searchType: SearchType): Promise<SearchR
 }
 
 export async function POST(req: NextRequest) {
-  let body: { query?: string; search_type?: string }
+  let body: { query?: string; search_type?: string; limit?: number }
   try {
     body = await req.json()
   } catch {
@@ -98,13 +108,15 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'query is required' }, { status: 400 })
   }
 
-  const validTypes: SearchType[] = ['top', 'user', 'hashtag', 'place']
+  const validTypes: SearchType[] = ['top', 'reel', 'hashtag', 'place']
   const searchType: SearchType = validTypes.includes(body.search_type as SearchType)
     ? (body.search_type as SearchType)
     : 'top'
 
+  const limit = Math.max(1, Math.min(500, Number(body.limit) || DEFAULT_LIMIT))
+
   try {
-    const record = await runPythonSearch(query, searchType)
+    const record = await runPythonSearch(query, searchType, limit)
     appendRecord(record)
     return NextResponse.json(record)
   } catch (err: unknown) {
