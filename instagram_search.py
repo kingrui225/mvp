@@ -93,6 +93,31 @@ REQUIRED_COOKIES = {"sessionid", "ds_user_id"}
 POLL_INTERVAL_SEC = 2
 POLL_TIMEOUT_SEC = 300
 
+# ---------------------------------------------------------------------------
+# Rate-limit / anti-abuse messaging
+# ---------------------------------------------------------------------------
+
+COOLDOWN_MSG = (
+    "[error] Instagram is rate-limiting this session.\n"
+    "        Wait at least 10–15 minutes before retrying.\n"
+    "        Do NOT run the script in a tight loop — this makes it worse."
+)
+
+CHALLENGE_MSG = (
+    "[error] Instagram issued a security challenge (ChallengeRequired).\n"
+    "        Open the Instagram app or website and complete the verification.\n"
+    "        Once cleared, re-run the script (session will be re-captured)."
+)
+
+
+def _get_feedback_message(cl) -> str:
+    """Safely extract Instagram's feedback_message from the last response."""
+    try:
+        last = getattr(cl, "last_json", {}) or {}
+        return last.get("feedback_message") or last.get("message") or ""
+    except Exception:
+        return ""
+
 
 def session_exists() -> bool:
     return SESSION_FILE.exists() and SESSION_FILE.stat().st_size > 0
@@ -221,25 +246,38 @@ def _cookies_to_jar(cookies: List[CookieEntry]) -> Dict[str, str]:
 def build_client(bundle: SessionBundle):
     """
     Build and return an instagrapi Client pre-loaded with the persisted session.
-    Device/UUID settings are merged from existing instagrapi_settings so the
-    same device fingerprint is reused across runs.
+
+    - Device/UUID settings are merged first so the same fingerprint is reused.
+    - `login_by_sessionid()` is the instagrapi-supported way to bootstrap from
+      a browser-captured sessionid without a password. It also validates the
+      session by fetching the current user's info, so a separate health_check
+      call is not needed.
+    - `delay_range` adds a random 1–3 s pause after each request to mimic
+      human cadence and reduce rate-limit risk.
     """
     from instagrapi import Client
 
     cl = Client()
 
-    # Merge any previously persisted instagrapi settings first so UUIDs are stable.
+    # Reuse stable device fingerprint (UUIDs, device_id, locale, etc.)
     if bundle.instagrapi_settings:
         cl.set_settings(bundle.instagrapi_settings)
 
-    # Inject the session cookies so instagrapi treats this as a logged-in client.
+    # Always apply the captured User-Agent for consistency.
+    cl.set_settings({"user_agent": bundle.user_agent})
+
+    # Random 1–3 s delay after every request — mimics human behaviour and
+    # reduces the chance of hitting rate limits.
+    cl.delay_range = [1, 3]
+
+    # Bootstrap auth state via the sessionid. This is the instagrapi-recommended
+    # path when you have a browser-captured sessionid but no password. It calls
+    # /users/{id}/info/ internally which also acts as our session health check.
     cookie_jar = _cookies_to_jar(bundle.cookies)
-    cl.set_settings(
-        {
-            "cookies": cookie_jar,
-            "user_agent": bundle.user_agent,
-        }
-    )
+    sessionid = cookie_jar.get("sessionid", "")
+    if not sessionid:
+        raise ValueError("No sessionid found in stored cookies — re-authentication required.")
+    cl.login_by_sessionid(sessionid)
 
     return cl
 
@@ -277,40 +315,30 @@ def _session_cookie_expired(bundle: SessionBundle) -> bool:
     return False
 
 
-def health_check(cl) -> bool:
-    """
-    Validate the session with a minimal authenticated request.
-    Uses /accounts/current_user/ (account_info) which is the lightest
-    authenticated endpoint instagrapi exposes — much lighter than a feed fetch
-    and less likely to trigger rate-limit or anti-bot responses.
-    Returns True if valid, False if the session has expired or been revoked.
-    """
-    from instagrapi.exceptions import ChallengeRequired, LoginRequired
-
-    try:
-        cl.account_info()
-        return True
-    except (LoginRequired, ChallengeRequired):
-        return False
-    except Exception as exc:
-        # Treat transient network / server errors as "session probably fine".
-        print(f"[warn] Health check hit a transient error (will continue): {exc}")
-        return True
-
 
 def get_authenticated_client():
     """
     Return an authenticated instagrapi Client.
 
     Decision tree:
-      1. No session.json              → browser login
-      2. sessionid cookie expired     → browser login (local check, no network)
-      3. Network health-check fails   → browser login
-      4. All good                     → reuse session (no browser)
+      1. No session.json                          → browser login
+      2. sessionid cookie locally expired         → browser login (no network)
+      3. login_by_sessionid() raises auth error   → browser login
+      4. All good                                 → reuse session (no browser)
 
-    Device settings (UUIDs, etc.) are written back to session.json after every
-    successful load so the same fingerprint is reused across runs.
+    `build_client()` calls `login_by_sessionid()` which fetches the current
+    user's info as its internal validation step, so no separate health_check
+    call is needed. Device settings are persisted back to session.json after
+    every successful load so the same fingerprint is reused.
     """
+    from instagrapi.exceptions import (
+        ChallengeRequired,
+        ClientThrottledError,
+        LoginRequired,
+        PleaseWaitFewMinutes,
+        RateLimitError,
+    )
+
     bundle = load_session()
 
     if bundle is not None:
@@ -320,18 +348,39 @@ def get_authenticated_client():
             delete_session()
             bundle = None
         else:
-            # ── Step 2: lightweight network verification ───────────────────
+            # ── Step 2: bootstrap + implicit session validation ───────────
             print("[info] Found existing session. Verifying…")
-            cl = build_client(bundle)
-            if health_check(cl):
+            try:
+                cl = build_client(bundle)
                 print("[info] Session is valid. Proceeding without browser.\n")
-                # Persist any updated device settings quietly (no extra log).
                 persist_device_settings(cl, bundle, verbose=False)
                 return cl
-            else:
+            except (LoginRequired,):
                 print("[warn] Session rejected by Instagram. Re-authenticating…")
                 delete_session()
                 bundle = None
+            except (ClientThrottledError, PleaseWaitFewMinutes, RateLimitError):
+                # Rate-limit during startup — session is probably fine; tell
+                # the user to wait rather than triggering a re-login loop.
+                print(COOLDOWN_MSG)
+                sys.exit(1)
+            except ChallengeRequired:
+                print(CHALLENGE_MSG)
+                delete_session()
+                sys.exit(1)
+            except Exception as exc:
+                # Transient network error — keep the session but abort.
+                print(f"[warn] Could not verify session (network error): {exc}")
+                print("[info] Retrying with existing session anyway…\n")
+                # Re-build without login_by_sessionid to avoid another network
+                # call; fall through to attempt the search.
+                from instagrapi import Client
+                cl = Client()
+                if bundle.instagrapi_settings:
+                    cl.set_settings(bundle.instagrapi_settings)
+                cl.set_settings({"cookies": _cookies_to_jar(bundle.cookies), "user_agent": bundle.user_agent})
+                cl.delay_range = [1, 3]
+                return cl
 
     # ── No valid session: open browser once and capture cookies ───────────
     bundle = browser_login()
@@ -454,7 +503,18 @@ def search_instagram(
     -------
     dict with keys: query, search_type, limit, results.
     """
-    from instagrapi.exceptions import ChallengeRequired, LoginRequired
+    from instagrapi.exceptions import (
+        AccountSuspended,
+        ChallengeRequired,
+        ClientConnectionError,
+        ClientRequestTimeout,
+        ClientThrottledError,
+        FeedbackRequired,
+        LoginRequired,
+        PleaseWaitFewMinutes,
+        RateLimitError,
+        SentryBlock,
+    )
 
     if search_type not in VALID_SEARCH_TYPES:
         raise ValueError(
@@ -507,19 +567,69 @@ def search_instagram(
                 results.append(PostResult(pk=pk, caption=getattr(p, "name", None), media_type="place"))
 
     except LoginRequired:
+        # Session expired mid-search. Delete it so the next run triggers
+        # browser re-authentication with the same device identity.
+        delete_session()
         print(
-            "\n[error] Instagram requires re-authentication (LoginRequired).\n"
-            "        Delete session.json and run the script again to log in."
+            "\n[error] Session expired during search (LoginRequired).\n"
+            "        session.json has been removed.\n"
+            "        Re-run the script — a browser window will open to log in again."
         )
         sys.exit(1)
+
     except ChallengeRequired:
+        # Do NOT rotate identity or delete session yet — the doc says to keep
+        # the same device/session while resolving the challenge in the app.
+        print(CHALLENGE_MSG)
+        sys.exit(1)
+
+    except (ClientThrottledError, RateLimitError):
+        # HTTP 429 — current IP or request pattern is too aggressive right now.
+        # This does NOT mean the session is broken; do not delete session.json.
+        print(f"\n{COOLDOWN_MSG}")
+        sys.exit(1)
+
+    except PleaseWaitFewMinutes:
+        # More serious than a plain 429 — Instagram is throttling at the account
+        # level, not just the request level. Freeze for longer.
         print(
-            "\n[error] Instagram issued a security challenge (ChallengeRequired).\n"
-            "        Delete session.json, wait a few minutes, then re-run."
+            f"\n{COOLDOWN_MSG}\n"
+            "        PleaseWaitFewMinutes: this account needs a longer cooldown.\n"
+            "        Consider waiting 30–60 minutes before retrying."
         )
         sys.exit(1)
+
+    except FeedbackRequired:
+        # An action was blocked or the account is temporarily restricted.
+        # Surface Instagram's own message so the operator knows what happened.
+        msg = _get_feedback_message(cl)
+        print(
+            "\n[error] Instagram blocked this action (FeedbackRequired).\n"
+            f"        Instagram says: {msg or '(no message returned)'}\n"
+            "        Stop repeating this search type for now and wait for the\n"
+            "        restriction to clear before retrying."
+        )
+        sys.exit(1)
+
+    except (AccountSuspended, SentryBlock):
+        # Account-level block — requires manual investigation, not a retry.
+        print(
+            "\n[error] This Instagram account has been suspended or blocked.\n"
+            "        Open the Instagram app and verify the account status manually."
+        )
+        sys.exit(1)
+
+    except (ClientConnectionError, ClientRequestTimeout) as exc:
+        # Pure network / transport errors — session is fine, just retry later.
+        print(
+            f"\n[error] Network error during search: {exc}\n"
+            "        Check your internet connection and retry. The session is intact."
+        )
+        sys.exit(1)
+
     except Exception as exc:
-        print(f"\n[error] Search request failed: {exc}")
+        # Unexpected error — print it verbatim so it can be reported.
+        print(f"\n[error] Search request failed unexpectedly: {exc}")
         sys.exit(1)
 
     return {
