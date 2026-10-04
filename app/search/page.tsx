@@ -1,11 +1,13 @@
 'use client'
 
 import {
+  AtSign,
   Clock,
   Film,
   Hash,
   Heart,
   Images,
+  LogOut,
   MapPin,
   MessageCircle,
   Play,
@@ -44,6 +46,13 @@ interface SearchRecord {
   search_type: SearchType
   limit: number
   results: PostResult[]
+}
+
+interface AccountStatus {
+  connected: boolean
+  username: string | null
+  user_id: string | null
+  created_at: string | null
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -204,6 +213,8 @@ export default function SearchPage() {
   const [error, setError] = useState<string | null>(null)
   const [activeRecord, setActiveRecord] = useState<SearchRecord | null>(null)
   const [history, setHistory] = useState<SearchRecord[]>([])
+  const [account, setAccount] = useState<AccountStatus | null>(null)
+  const [disconnecting, setDisconnecting] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -214,7 +225,22 @@ export default function SearchPage() {
         if (data.length > 0) setActiveRecord(data[0])
       })
       .catch(() => {})
+
+    fetch('/api/account')
+      .then((r) => r.json())
+      .then((data: AccountStatus) => setAccount(data))
+      .catch(() => {})
   }, [])
+
+  async function handleDisconnect() {
+    setDisconnecting(true)
+    try {
+      await fetch('/api/account', { method: 'DELETE' })
+      setAccount({ connected: false, username: null, user_id: null, created_at: null })
+    } finally {
+      setDisconnecting(false)
+    }
+  }
 
   const runSearch = useCallback(
     async (e?: FormEvent) => {
@@ -236,6 +262,11 @@ export default function SearchPage() {
           const record = data as SearchRecord
           setActiveRecord(record)
           setHistory((prev) => [record, ...prev.filter((r) => r.id !== record.id)])
+          // Refresh account status in case this was the first login
+          fetch('/api/account')
+            .then((r) => r.json())
+            .then((a: AccountStatus) => setAccount(a))
+            .catch(() => {})
         }
       } catch {
         setError('Network error — could not reach the server.')
@@ -322,6 +353,56 @@ export default function SearchPage() {
                 </div>
               )
             })
+          )}
+        </div>
+
+        {/* ── Account panel (pinned footer) ──────────────────────── */}
+        <div className="border-t border-[#edf0f3] px-4 py-3">
+          <p className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-[#a3acb7]">
+            Account
+          </p>
+          {account === null ? (
+            // Loading skeleton
+            <div className="flex items-center gap-2.5">
+              <div className="size-7 animate-pulse rounded-full bg-[#edf0f3]" />
+              <div className="h-3 w-24 animate-pulse rounded bg-[#edf0f3]" />
+            </div>
+          ) : account.connected ? (
+            // Connected state
+            <div className="flex items-center gap-2.5">
+              {/* Instagram gradient avatar */}
+              <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[#f9ce34] via-[#ee2a7b] to-[#6228d7]">
+                <AtSign className="size-3.5 text-white" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-xs font-semibold text-[#273442]">
+                  @{account.username ?? account.user_id ?? 'Instagram'}
+                </p>
+                <p className="text-[10px] text-[#a3acb7]">Connected</p>
+              </div>
+              <button
+                onClick={handleDisconnect}
+                disabled={disconnecting}
+                title="Disconnect account"
+                className="shrink-0 text-[#b0b8c1] transition hover:text-[#e53e3e] disabled:opacity-50"
+              >
+                {disconnecting
+                  ? <span className="size-3.5 animate-spin rounded-full border border-[#b0b8c1] border-t-transparent inline-block" />
+                  : <LogOut className="size-3.5" />
+                }
+              </button>
+            </div>
+          ) : (
+            // Disconnected state
+            <div className="flex items-center gap-2.5">
+              <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-[#f0f2f5]">
+                <AtSign className="size-3.5 text-[#a3acb7]" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-semibold text-[#8994a1]">Not connected</p>
+                <p className="text-[10px] text-[#a3acb7]">Run a search to log in</p>
+              </div>
+            </div>
           )}
         </div>
       </aside>

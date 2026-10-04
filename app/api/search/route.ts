@@ -4,7 +4,7 @@ import path from 'path'
 import { spawn } from 'child_process'
 import { NextRequest, NextResponse } from 'next/server'
 
-const REPO_ROOT = path.resolve(process.cwd())
+const REPO_ROOT = path.resolve(/*turbopackIgnore: true*/ process.cwd())
 const SEARCHES_FILE = path.join(REPO_ROOT, 'searches.json')
 const SCRIPT_PATH = path.join(REPO_ROOT, 'instagram_search.py')
 

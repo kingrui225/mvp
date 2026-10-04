@@ -55,6 +55,8 @@ class SessionBundle(BaseModel):
     # Full instagrapi settings dict (device ids, uuid, etc.)
     instagrapi_settings: Dict[str, Any] = {}
     created_at: str = ""
+    # Instagram username for the connected account — populated after first login
+    username: Optional[str] = None
 
     @field_validator("created_at", mode="before")
     @classmethod
@@ -286,6 +288,7 @@ def persist_device_settings(cl, bundle: SessionBundle, *, verbose: bool = False)
     """
     Write instagrapi's generated device settings (UUIDs, device_id, etc.)
     back into the bundle so the same fingerprint is reused on the next run.
+    Also captures the authenticated username from the client.
     Only logs when verbose=True (i.e. on first-time save after browser login).
     """
     try:
@@ -294,9 +297,13 @@ def persist_device_settings(cl, bundle: SessionBundle, *, verbose: bool = False)
         settings.pop("cookies", None)
         settings.pop("user_agent", None)
         bundle.instagrapi_settings.update(settings)
+        # Capture the username that login_by_sessionid() resolved.
+        if getattr(cl, "username", None):
+            bundle.username = cl.username
         SESSION_FILE.write_text(bundle.model_dump_json(indent=2), encoding="utf-8")
         if verbose:
-            print(f"[info] Session saved to {SESSION_FILE}")
+            user_display = f" (@{bundle.username})" if bundle.username else ""
+            print(f"[info] Session saved to {SESSION_FILE}{user_display}")
     except Exception as exc:
         print(f"[warn] Could not persist device settings: {exc}")
     return bundle
