@@ -95,6 +95,18 @@ REQUIRED_COOKIES = {"sessionid", "ds_user_id"}
 POLL_INTERVAL_SEC = 2
 POLL_TIMEOUT_SEC = 300
 
+# URL path fragments that indicate the user is still mid-auth flow.
+# The browser must navigate away from ALL of these before we capture cookies.
+AUTH_PATHS = (
+    "/accounts/login",
+    "/accounts/emailsignup",
+    "/accounts/onetap",
+    "/challenge/",
+    "/two_factor",
+    "/verify/",
+    "/accounts/suspended",
+)
+
 # ---------------------------------------------------------------------------
 # Rate-limit / anti-abuse messaging
 # ---------------------------------------------------------------------------
@@ -180,33 +192,67 @@ def _build_chrome_driver():
     return driver
 
 
+def _on_auth_page(url: str) -> bool:
+    """Return True if the URL is still on a login / verification / challenge page."""
+    return any(fragment in url for fragment in AUTH_PATHS)
+
+
 def browser_login() -> SessionBundle:
     """
-    Open Instagram login page in Chrome and wait for the user to complete
-    authentication manually. Returns a SessionBundle when the required cookies
-    are detected.
+    Open Instagram login page in Chrome and wait for the user to fully complete
+    authentication — including any email/SMS verification or 2FA prompts.
+
+    Two conditions must BOTH be true before the browser closes:
+      1. The required cookies (sessionid, ds_user_id) are present.
+      2. The browser URL is no longer on any auth/challenge/verification page.
+
+    This prevents the window from closing mid-email-verification, which used to
+    happen because Instagram sets cookies before the verification step completes.
     """
     print("\n[auth] Starting browser-based login…")
     print("[auth] A Chrome window will open. Please log in to Instagram.")
-    print("[auth] Handle any 2FA or CAPTCHA prompts in the browser.")
-    print(f"[auth] Waiting up to {POLL_TIMEOUT_SEC // 60} minutes for login…\n")
+    print("[auth] Complete ALL steps including email/SMS verification if prompted.")
+    print("[auth] The window will close automatically once you reach the home feed.")
+    print(f"[auth] Waiting up to {POLL_TIMEOUT_SEC // 60} minutes…\n")
 
     driver = _build_chrome_driver()
     try:
         driver.get("https://www.instagram.com/accounts/login/")
 
+        cookies_ready = False
         deadline = time.monotonic() + POLL_TIMEOUT_SEC
+
         while time.monotonic() < deadline:
-            cookies = driver.get_cookies()
-            cookie_names = {c["name"] for c in cookies}
-            if REQUIRED_COOKIES.issubset(cookie_names):
-                break
+            try:
+                current_url = driver.current_url
+                cookies = driver.get_cookies()
+                cookie_names = {c["name"] for c in cookies}
+
+                has_required = REQUIRED_COOKIES.issubset(cookie_names)
+                still_in_auth = _on_auth_page(current_url)
+
+                if has_required and not still_in_auth:
+                    break
+
+                # Give the user a progress hint when cookies appear but they're
+                # still mid-verification (e.g. checking their email).
+                if has_required and still_in_auth and not cookies_ready:
+                    cookies_ready = True
+                    print(
+                        "[auth] Session cookies detected — waiting for you to "
+                        "finish verification before closing the browser…"
+                    )
+
+            except Exception:
+                # Window may be navigating; ignore transient WebDriver errors.
+                pass
+
             time.sleep(POLL_INTERVAL_SEC)
         else:
             driver.quit()
             raise TimeoutError(
-                f"Login not detected within {POLL_TIMEOUT_SEC} seconds. "
-                "Please run the script again and complete login promptly."
+                f"Login not completed within {POLL_TIMEOUT_SEC} seconds. "
+                "Please re-run the script and complete all verification steps promptly."
             )
 
         # Capture User-Agent from the live browser.
@@ -226,7 +272,7 @@ def browser_login() -> SessionBundle:
         ]
 
         bundle = SessionBundle(user_agent=user_agent, cookies=cookie_models)
-        print("[auth] Login detected. Closing browser…")
+        print("[auth] Login fully complete. Closing browser…")
         return bundle
 
     finally:
