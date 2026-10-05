@@ -439,6 +439,7 @@ export default function SearchPage() {
               ref={inputRef}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
+              autoComplete="off"
               placeholder={
                 searchType === 'hashtag' ? 'Search by hashtag…' :
                 searchType === 'place'   ? 'Search by location…' :

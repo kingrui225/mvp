@@ -72,7 +72,7 @@ export default function LoginPage() {
 
         {/* Card */}
         <div className="rounded-2xl border border-[#e1e5ea] bg-white px-8 py-8 shadow-sm">
-          <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+          <form onSubmit={handleSubmit} autoComplete="off" className="flex flex-col gap-4">
             <div className="flex flex-col gap-1.5">
               <label htmlFor="email" className="text-xs font-semibold text-[#273442]">
                 Email
@@ -80,7 +80,9 @@ export default function LoginPage() {
               <input
                 id="email"
                 type="email"
-                autoComplete="email"
+                autoComplete="off"
+                readOnly
+                onFocus={(e) => e.currentTarget.removeAttribute('readonly')}
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
@@ -97,7 +99,9 @@ export default function LoginPage() {
                 <input
                   id="password"
                   type="password"
-                  autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
+                  autoComplete="off"
+                  readOnly
+                  onFocus={(e) => e.currentTarget.removeAttribute('readonly')}
                   required
                   minLength={8}
                   value={password}

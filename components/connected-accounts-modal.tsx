@@ -141,12 +141,14 @@ export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Pr
           </div>
 
           {!account?.connected && (
-            <form onSubmit={handleConnect} className="mt-4 flex flex-col gap-3">
+            <form onSubmit={handleConnect} autoComplete="off" className="mt-4 flex flex-col gap-3">
               <input
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 placeholder="Instagram username"
-                autoComplete="username"
+                autoComplete="off"
+                readOnly
+                onFocus={(e) => e.currentTarget.removeAttribute('readonly')}
                 required
                 className="rounded-xl border border-[#d9dfe6] bg-[#f8f9fb] px-3.5 py-2.5 text-sm outline-none focus:border-[#17202b] focus:bg-white"
               />
@@ -155,7 +157,9 @@ export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Pr
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="Instagram password"
-                autoComplete="current-password"
+                autoComplete="off"
+                readOnly
+                onFocus={(e) => e.currentTarget.removeAttribute('readonly')}
                 required
                 className="rounded-xl border border-[#d9dfe6] bg-[#f8f9fb] px-3.5 py-2.5 text-sm outline-none focus:border-[#17202b] focus:bg-white"
               />
@@ -164,6 +168,9 @@ export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Pr
                   value={code}
                   onChange={(e) => setCode(e.target.value)}
                   placeholder="Verification code"
+                  autoComplete="off"
+                  readOnly
+                  onFocus={(e) => e.currentTarget.removeAttribute('readonly')}
                   required
                   className="rounded-xl border border-[#d9dfe6] bg-[#f8f9fb] px-3.5 py-2.5 text-sm outline-none focus:border-[#17202b] focus:bg-white"
                 />
