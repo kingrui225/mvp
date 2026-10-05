@@ -694,6 +694,173 @@ def search_instagram(
 
 
 # ---------------------------------------------------------------------------
+# JSON-RPC helpers (no Selenium — used by the Next.js server via lib/instagram.ts)
+# ---------------------------------------------------------------------------
+
+def build_client_from_settings(settings: dict):
+    """
+    Restore an instagrapi Client from a previously-saved get_settings() dict.
+    The dict must contain 'authorization_data' with a valid sessionid.
+    No browser or password needed.
+    """
+    from instagrapi import Client
+
+    cl = Client()
+    cl.set_settings(settings)
+    cl.delay_range = [1, 3]
+    return cl
+
+
+def rpc_login(username: str, password: str) -> dict:
+    """
+    Attempt direct instagrapi login (no Selenium).
+    Returns the session settings dict on success so the caller can persist it.
+    The password is NEVER included in the response or written to any file.
+    """
+    from instagrapi import Client
+    from instagrapi.exceptions import (
+        BadPassword,
+        ChallengeRequired,
+        FeedbackRequired,
+        InvalidUser,
+        LoginRequired,
+        TwoFactorRequired,
+    )
+
+    cl = Client()
+    cl.delay_range = [1, 3]
+
+    try:
+        cl.login(username, password)
+        settings = cl.get_settings()
+        return {
+            "ok": True,
+            "username": cl.username,
+            "user_id": str(cl.user_id) if cl.user_id else None,
+            "session": settings,
+        }
+    except ChallengeRequired:
+        # Instagram sent a verification code to the user's email/phone.
+        return {
+            "ok": False,
+            "challenge_required": True,
+            "error": "Instagram requires a verification code.",
+        }
+    except (BadPassword, InvalidUser, LoginRequired):
+        return {"ok": False, "error": "Authentication failed."}
+    except TwoFactorRequired:
+        return {"ok": False, "error": "Two-factor authentication is required. Disable it or use an app password."}
+    except FeedbackRequired:
+        return {"ok": False, "error": "Authentication failed."}
+    except Exception:
+        return {"ok": False, "error": "Authentication failed."}
+
+
+def rpc_challenge(username: str, password: str, code: str) -> dict:
+    """
+    Re-attempt login and supply the challenge code via the challenge_code_handler
+    callback that instagrapi invokes internally when ChallengeRequired is raised.
+    """
+    from instagrapi import Client
+
+    cl = Client()
+    cl.delay_range = [1, 3]
+    # instagrapi calls this when ChallengeRequired is raised during login();
+    # the callback receives (username, choice) and must return the code string.
+    cl.challenge_code_handler = lambda _u, _c: code
+
+    try:
+        cl.login(username, password)
+        settings = cl.get_settings()
+        return {
+            "ok": True,
+            "username": cl.username,
+            "user_id": str(cl.user_id) if cl.user_id else None,
+            "session": settings,
+        }
+    except Exception:
+        return {"ok": False, "error": "Verification failed. Check the code and try again."}
+
+
+def rpc_search(payload: dict) -> dict:
+    """
+    Run a search using a caller-supplied session dict (pre-decrypted by TypeScript).
+    Never touches session.json or any file in RPC mode.
+    """
+    session = payload.get("session")
+    query = str(payload.get("query", "")).strip()
+    search_type = str(payload.get("search_type", "top"))
+    limit = int(payload.get("limit", DEFAULT_LIMIT))
+
+    if not session:
+        return {
+            "ok": False,
+            "error": "No Instagram session found. Connect your Instagram account first.",
+        }
+    if not query:
+        return {"ok": False, "error": "query is required."}
+
+    cl = build_client_from_settings(session)
+    try:
+        output = search_instagram(cl, query=query, search_type=search_type, limit=limit)
+        return {"ok": True, **output}
+    except SystemExit:
+        # search_instagram calls sys.exit() on rate-limit / auth errors.
+        # Convert to an RPC failure so the caller gets a JSON response.
+        return {"ok": False, "error": "Search failed. Check session validity or wait before retrying."}
+    except Exception as exc:
+        return {"ok": False, "error": f"Search failed: {exc}"}
+
+
+def handle_json_rpc() -> None:
+    """
+    JSON-RPC entry point.
+
+    Reads one JSON object from stdin, dispatches to rpc_login / rpc_challenge /
+    rpc_search, and writes exactly one JSON object to stdout.
+
+    All log/print output from inner functions is redirected to stderr so the
+    caller (lib/instagram.ts) can safely parse stdout as pure JSON.
+    """
+    # Redirect existing print() calls to stderr for this session.
+    real_stdout = sys.stdout
+    sys.stdout = sys.stderr
+
+    result: dict = {"ok": False, "error": "Internal error."}
+    try:
+        raw = sys.stdin.read()
+        payload = json.loads(raw)
+        cmd = payload.get("cmd")
+
+        if cmd == "login":
+            result = rpc_login(
+                str(payload.get("username", "")),
+                str(payload.get("password", "")),
+            )
+        elif cmd == "challenge":
+            result = rpc_challenge(
+                str(payload.get("username", "")),
+                str(payload.get("password", "")),
+                str(payload.get("code", "")),
+            )
+        elif cmd == "search":
+            result = rpc_search(payload)
+        else:
+            result = {"ok": False, "error": f"Unknown RPC command: {cmd!r}"}
+
+    except json.JSONDecodeError:
+        result = {"ok": False, "error": "Invalid JSON on stdin."}
+    except SystemExit:
+        # Catch any sys.exit() from inner functions and convert to JSON error.
+        pass
+    except Exception:
+        pass
+    finally:
+        sys.stdout = real_stdout
+        print(json.dumps(result, default=str), flush=True)
+
+
+# ---------------------------------------------------------------------------
 # CLI entrypoint
 # ---------------------------------------------------------------------------
 
@@ -701,22 +868,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="instagram_search",
         description=(
-            "Perform personalized Instagram searches using a persisted "
-            "browser session. First run opens Chrome for manual login; "
-            "subsequent runs are pure HTTP (no browser)."
+            "Instagram search tool.\n"
+            "Pass --json-rpc to use the server-side JSON-RPC mode (no browser).\n"
+            "Otherwise, searches via a persisted local session."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   python instagram_search.py "coffee shops" --type top
-  python instagram_search.py "nike" --type user
   python instagram_search.py "travel" --type hashtag
   python instagram_search.py "New York" --type place
 """,
     )
     parser.add_argument(
         "query",
-        help="Search query (e.g. 'coffee shops', 'nike', 'travel')",
+        nargs="?",
+        default=None,
+        help="Search query (e.g. 'coffee shops', 'travel').",
+    )
+    parser.add_argument(
+        "--json-rpc",
+        action="store_true",
+        help="Read a JSON command from stdin and write a JSON response to stdout (server mode).",
     )
     parser.add_argument(
         "--type",
@@ -748,6 +921,15 @@ Examples:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+
+    # ── JSON-RPC mode (used by Next.js server via lib/instagram.ts) ──────────
+    if args.json_rpc:
+        handle_json_rpc()
+        return
+
+    # ── CLI mode (local development / manual testing) ─────────────────────────
+    if not args.query:
+        parser.error("query is required in CLI mode (or use --json-rpc).")
 
     if args.reset_session:
         delete_session()

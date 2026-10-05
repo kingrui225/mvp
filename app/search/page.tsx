@@ -12,11 +12,14 @@ import {
   MessageCircle,
   Play,
   Search,
+  Settings,
   Sparkles,
   Trash2,
   X,
 } from 'lucide-react'
 import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
+import { createClient } from '@/lib/supabase/client'
+import { ConnectedAccountsModal, type InstagramStatus } from '@/components/connected-accounts-modal'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -46,13 +49,6 @@ interface SearchRecord {
   search_type: SearchType
   limit: number
   results: PostResult[]
-}
-
-interface AccountStatus {
-  connected: boolean
-  username: string | null
-  user_id: string | null
-  created_at: string | null
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -213,10 +209,12 @@ export default function SearchPage() {
   const [error, setError] = useState<string | null>(null)
   const [activeRecord, setActiveRecord] = useState<SearchRecord | null>(null)
   const [history, setHistory] = useState<SearchRecord[]>([])
-  const [account, setAccount] = useState<AccountStatus | null>(null)
-  const [disconnecting, setDisconnecting] = useState(false)
+  const [igAccount, setIgAccount] = useState<InstagramStatus | null>(null)
+  const [accountModalOpen, setAccountModalOpen] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
+  const supabase = createClient()
 
+  // ── Load history + Instagram status on mount ──────────────────────────────
   useEffect(() => {
     fetch('/api/history')
       .then((r) => r.json())
@@ -226,22 +224,19 @@ export default function SearchPage() {
       })
       .catch(() => {})
 
-    fetch('/api/account')
+    fetch('/api/instagram/status')
       .then((r) => r.json())
-      .then((data: AccountStatus) => setAccount(data))
+      .then((data: InstagramStatus) => setIgAccount(data))
       .catch(() => {})
   }, [])
 
-  async function handleDisconnect() {
-    setDisconnecting(true)
-    try {
-      await fetch('/api/account', { method: 'DELETE' })
-      setAccount({ connected: false, username: null, user_id: null, created_at: null })
-    } finally {
-      setDisconnecting(false)
-    }
+  // ── Supabase sign out ─────────────────────────────────────────────────────
+  async function handleSignOut() {
+    await supabase.auth.signOut()
+    window.location.href = '/login'
   }
 
+  // ── Search ────────────────────────────────────────────────────────────────
   const runSearch = useCallback(
     async (e?: FormEvent) => {
       e?.preventDefault()
@@ -262,10 +257,10 @@ export default function SearchPage() {
           const record = data as SearchRecord
           setActiveRecord(record)
           setHistory((prev) => [record, ...prev.filter((r) => r.id !== record.id)])
-          // Refresh account status in case this was the first login
-          fetch('/api/account')
+          // Refresh IG account status in case this was the first linked search.
+          fetch('/api/instagram/status')
             .then((r) => r.json())
-            .then((a: AccountStatus) => setAccount(a))
+            .then((a: InstagramStatus) => setIgAccount(a))
             .catch(() => {})
         }
       } catch {
@@ -277,7 +272,8 @@ export default function SearchPage() {
     [query, searchType, limit, loading],
   )
 
-  async function deleteRecord(id: string) {
+  // ── Hide / soft-delete a history record ───────────────────────────────────
+  async function hideRecord(id: string) {
     await fetch(`/api/history?id=${id}`, { method: 'DELETE' })
     setHistory((prev) => {
       const next = prev.filter((r) => r.id !== id)
@@ -345,7 +341,7 @@ export default function SearchPage() {
                     </div>
                   </div>
                   <button
-                    onClick={(e) => { e.stopPropagation(); deleteRecord(record.id) }}
+                    onClick={(e) => { e.stopPropagation(); hideRecord(record.id) }}
                     className="shrink-0 text-transparent transition group-hover:text-[#b0b8c1] hover:!text-[#657180]"
                   >
                     <X className="size-3.5" />
@@ -356,54 +352,57 @@ export default function SearchPage() {
           )}
         </div>
 
-        {/* ── Account panel (pinned footer) ──────────────────────── */}
-        <div className="border-t border-[#edf0f3] px-4 py-3">
-          <p className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-[#a3acb7]">
-            Account
-          </p>
-          {account === null ? (
-            // Loading skeleton
-            <div className="flex items-center gap-2.5">
-              <div className="size-7 animate-pulse rounded-full bg-[#edf0f3]" />
-              <div className="h-3 w-24 animate-pulse rounded bg-[#edf0f3]" />
-            </div>
-          ) : account.connected ? (
-            // Connected state
-            <div className="flex items-center gap-2.5">
-              {/* Instagram gradient avatar */}
-              <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[#f9ce34] via-[#ee2a7b] to-[#6228d7]">
-                <AtSign className="size-3.5 text-white" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-xs font-semibold text-[#273442]">
-                  @{account.username ?? account.user_id ?? 'Instagram'}
-                </p>
-                <p className="text-[10px] text-[#a3acb7]">Connected</p>
-              </div>
-              <button
-                onClick={handleDisconnect}
-                disabled={disconnecting}
-                title="Disconnect account"
-                className="shrink-0 text-[#b0b8c1] transition hover:text-[#e53e3e] disabled:opacity-50"
-              >
-                {disconnecting
-                  ? <span className="size-3.5 animate-spin rounded-full border border-[#b0b8c1] border-t-transparent inline-block" />
-                  : <LogOut className="size-3.5" />
-                }
-              </button>
-            </div>
-          ) : (
-            // Disconnected state
-            <div className="flex items-center gap-2.5">
-              <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-[#f0f2f5]">
-                <AtSign className="size-3.5 text-[#a3acb7]" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="text-xs font-semibold text-[#8994a1]">Not connected</p>
-                <p className="text-[10px] text-[#a3acb7]">Run a search to log in</p>
-              </div>
-            </div>
-          )}
+        {/* ── Sidebar footer ─────────────────────────────────────────── */}
+        <div className="border-t border-[#edf0f3]">
+          {/* Instagram account button — opens Connected Accounts modal */}
+          <button
+            onClick={() => setAccountModalOpen(true)}
+            className="flex w-full items-center gap-2.5 px-4 py-3 transition hover:bg-[#f7f8fa]"
+          >
+            {igAccount === null ? (
+              // Loading skeleton
+              <>
+                <div className="size-7 animate-pulse rounded-full bg-[#edf0f3]" />
+                <div className="h-3 w-24 animate-pulse rounded bg-[#edf0f3]" />
+              </>
+            ) : igAccount.connected ? (
+              // Connected state
+              <>
+                <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[#f9ce34] via-[#ee2a7b] to-[#6228d7]">
+                  <AtSign className="size-3.5 text-white" />
+                </div>
+                <div className="min-w-0 flex-1 text-left">
+                  <p className="truncate text-xs font-semibold text-[#273442]">
+                    @{igAccount.username ?? igAccount.user_id ?? 'Instagram'}
+                  </p>
+                  <p className="text-[10px] text-[#a3acb7]">Tap to manage</p>
+                </div>
+                <Settings className="size-3.5 shrink-0 text-[#b0b8c1]" />
+              </>
+            ) : (
+              // Disconnected state
+              <>
+                <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-[#f0f2f5]">
+                  <AtSign className="size-3.5 text-[#a3acb7]" />
+                </div>
+                <div className="min-w-0 flex-1 text-left">
+                  <p className="text-xs font-semibold text-[#8994a1]">Connect Instagram</p>
+                  <p className="text-[10px] text-[#a3acb7]">Tap to link an account</p>
+                </div>
+              </>
+            )}
+          </button>
+
+          {/* App sign-out button — signs out of the page account (Supabase) */}
+          <div className="border-t border-[#edf0f3]">
+            <button
+              onClick={handleSignOut}
+              className="flex w-full items-center gap-2 px-4 py-3 text-xs text-[#8994a1] transition hover:bg-[#f7f8fa] hover:text-[#273442]"
+            >
+              <LogOut className="size-3.5" />
+              Sign out
+            </button>
+          </div>
         </div>
       </aside>
 
@@ -503,7 +502,7 @@ export default function SearchPage() {
                 <Sparkles className="size-6 text-[#17202b]" />
               </div>
               <p className="text-sm font-medium text-[#657180]">Searching Instagram…</p>
-              <p className="text-xs text-[#a3acb7]">This may take a moment on first run.</p>
+              <p className="text-xs text-[#a3acb7]">This may take a moment.</p>
             </div>
           )}
 
@@ -548,13 +547,26 @@ export default function SearchPage() {
               <p className="text-sm font-medium text-[#657180]">
                 Search for posts, reels, or carousels.
               </p>
-              <p className="text-xs text-[#a3acb7]">
-                On first run a browser opens so you can log in to Instagram.
-              </p>
+              {!igAccount?.connected && (
+                <button
+                  onClick={() => setAccountModalOpen(true)}
+                  className="mt-1 rounded-lg bg-[#17202b] px-4 py-2 text-xs font-semibold text-white hover:bg-[#2b3948]"
+                >
+                  Connect Instagram to start searching
+                </button>
+              )}
             </div>
           )}
         </div>
       </main>
+
+      {/* ── Connected Accounts Modal ─────────────────────────────────── */}
+      <ConnectedAccountsModal
+        open={accountModalOpen}
+        onClose={() => setAccountModalOpen(false)}
+        account={igAccount}
+        onChanged={(next) => setIgAccount(next)}
+      />
     </div>
   )
 }
