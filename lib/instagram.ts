@@ -10,6 +10,8 @@ const SCRIPT_PATH = path.join(REPO_ROOT, 'instagram_search.py')
 
 export type IgCommand =
   | { cmd: 'login'; username: string; password: string }
+  | { cmd: 'browser_login'; timeout_seconds?: number }
+  | { cmd: 'login_by_sessionid'; sessionid: string }
   | { cmd: 'challenge'; username: string; password: string; code: string }
   | { cmd: 'search'; query: string; search_type: string; limit: number; session?: Record<string, unknown> }
 
@@ -69,9 +71,13 @@ export function runInstagramCommand(payload: IgCommand, timeoutMs = 90_000): Pro
 
     proc.on('close', (code) => {
       clearTimeout(timer)
+      if (stderr.trim()) {
+        console.error('[instagram.ts stderr]', stderr.trim())
+      }
       try {
         const jsonStart = stdout.indexOf('{')
         if (jsonStart === -1) {
+          console.error('[instagram.ts] no JSON in stdout:', stdout)
           finish({
             ok: false,
             error: 'Instagram request failed.',

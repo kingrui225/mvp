@@ -30,6 +30,30 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, ConfigDict, field_validator
 
 # ---------------------------------------------------------------------------
+# Patch instagrapi to use the current Instagram Android app version.
+# Instagram pushed v450 on 2026-10-04 and now rejects v449 User-Agent headers.
+# The bloks_versioning_id for v450 is not yet public; we reuse the v449 hash
+# which is only needed for the CAA username/password login flow — not for
+# session-based (sessionid / Selenium cookie) authentication.
+# ---------------------------------------------------------------------------
+try:
+    import instagrapi.config as _ig_cfg
+    _NEW_VER = "450.0.0.41.77"
+    _NEW_VER_CODE = "385609976"
+    _OLD_HASH = _ig_cfg.APP_SETTINGS.get(
+        _ig_cfg.DEFAULT_APP_VERSION, {}
+    ).get("bloks_versioning_id", "")
+    if _NEW_VER not in _ig_cfg.APP_SETTINGS:
+        _ig_cfg.APP_SETTINGS[_NEW_VER] = {
+            "app_version": _NEW_VER,
+            "version_code": _NEW_VER_CODE,
+            "bloks_versioning_id": _OLD_HASH,
+        }
+    _ig_cfg.DEFAULT_APP_VERSION = _NEW_VER
+except Exception:
+    pass  # If instagrapi isn't installed yet, skip silently
+
+# ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
 
@@ -708,6 +732,11 @@ def build_client_from_settings(settings: dict):
     cl = Client()
     cl.set_settings(settings)
     cl.delay_range = [1, 3]
+    # Restore username/user_id stashed by rpc_browser_login (no private-API call)
+    if settings.get("_af_username"):
+        cl.username = settings["_af_username"]
+    if settings.get("_af_user_id") and str(settings["_af_user_id"]).isdigit():
+        cl.user_id = int(settings["_af_user_id"])
     return cl
 
 
@@ -719,12 +748,16 @@ def rpc_login(username: str, password: str) -> dict:
     """
     from instagrapi import Client
     from instagrapi.exceptions import (
+        BadCredentials,
         BadPassword,
         ChallengeRequired,
         FeedbackRequired,
-        InvalidUser,
         LoginRequired,
+        PleaseWaitFewMinutes,
+        SentryBlock,
         TwoFactorRequired,
+        UnknownError,
+        UserNotFound,
     )
 
     cl = Client()
@@ -746,14 +779,187 @@ def rpc_login(username: str, password: str) -> dict:
             "challenge_required": True,
             "error": "Instagram requires a verification code.",
         }
-    except (BadPassword, InvalidUser, LoginRequired):
+    except (BadPassword, BadCredentials, UserNotFound, LoginRequired):
         return {"ok": False, "error": "Authentication failed."}
     except TwoFactorRequired:
         return {"ok": False, "error": "Two-factor authentication is required. Disable it or use an app password."}
     except FeedbackRequired:
         return {"ok": False, "error": "Authentication failed."}
-    except Exception:
-        return {"ok": False, "error": "Authentication failed."}
+    except (SentryBlock, PleaseWaitFewMinutes):
+        return {"ok": False, "error": "Instagram is temporarily blocking automated access. Wait a few minutes and try again."}
+    except UnknownError as e:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        return {"ok": False, "error": f"Instagram returned an unexpected error: {e}"}
+    except Exception as e:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        return {"ok": False, "error": f"Login error: {type(e).__name__}: {e}"}
+
+
+def rpc_login_by_sessionid(sessionid: str) -> dict:
+    """
+    Authenticate via Instagram web sessionid cookie (immune to mobile app version checks).
+    The raw sessionid is NEVER stored — only the resulting instagrapi session settings.
+    """
+    from instagrapi import Client
+    from instagrapi.exceptions import LoginRequired, BadCredentials
+
+    if not sessionid or len(sessionid) < 10:
+        return {"ok": False, "error": "Invalid session ID."}
+
+    cl = Client()
+    cl.delay_range = [1, 3]
+    try:
+        cl.login_by_sessionid(sessionid)
+        settings = cl.get_settings()
+        return {
+            "ok": True,
+            "username": cl.username,
+            "user_id": str(cl.user_id) if cl.user_id else None,
+            "session": settings,
+        }
+    except (LoginRequired, BadCredentials):
+        return {"ok": False, "error": "Session ID is invalid or expired. Please get a fresh one."}
+    except Exception as e:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        return {"ok": False, "error": f"Login error: {type(e).__name__}: {e}"}
+
+
+def rpc_browser_login(timeout_seconds: int = 300) -> dict:
+    """
+    Open a visible Chrome window so the user can log in to Instagram normally.
+
+    After login we capture the browser cookies and build an instagrapi session
+    directly — WITHOUT calling any private-API validation endpoints that would
+    trigger the Instagram app-version check.  The raw cookies/sessionid are
+    never stored; only the encrypted instagrapi session blob is persisted.
+    """
+    import re as _re
+    import time
+    from instagrapi import Client
+
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.common.by import By
+        from selenium.common.exceptions import WebDriverException, NoSuchElementException
+    except ImportError:
+        return {"ok": False, "error": "Selenium is not installed. Run: pip3 install selenium"}
+
+    options = Options()
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--disable-infobars")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+
+    try:
+        driver = webdriver.Chrome(options=options)
+    except WebDriverException as e:
+        return {"ok": False, "error": f"Could not launch Chrome: {e}"}
+
+    driver.execute_cdp_cmd(
+        "Page.addScriptToEvaluateOnNewDocument",
+        {"source": "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"},
+    )
+
+    try:
+        driver.get("https://www.instagram.com/accounts/login/")
+        print(f"[browser_login] Browser opened — waiting up to {timeout_seconds}s for user to log in…", flush=True)
+
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            time.sleep(2)
+            try:
+                current_url = driver.current_url
+                cookie_list = driver.get_cookies()
+                cookies = {c["name"]: c["value"] for c in cookie_list}
+                sessionid = cookies.get("sessionid", "")
+                ds_user_id = cookies.get("ds_user_id", "")
+
+                logged_in = (
+                    sessionid
+                    and ds_user_id
+                    and "accounts/login" not in current_url
+                    and "accounts/suspended" not in current_url
+                    and "challenge" not in current_url
+                )
+                if not logged_in:
+                    continue
+
+                print("[browser_login] Login detected — extracting credentials from browser.", flush=True)
+
+                # ── Get username from the page (no private-API call needed) ──
+                username = None
+                try:
+                    # Try shared_data JSON embedded in the page
+                    username = driver.execute_script(
+                        "var d=window.__additionalDataLoaded||{};"
+                        "return (window._sharedData||{}).config?.viewer?.username || null;"
+                    )
+                except Exception:
+                    pass
+
+                if not username:
+                    try:
+                        # Navigate to account edit page and read the username input
+                        driver.get("https://www.instagram.com/accounts/edit/")
+                        time.sleep(3)
+                        el = driver.find_element(By.CSS_SELECTOR, 'input[name="username"]')
+                        username = el.get_attribute("value") or None
+                    except (NoSuchElementException, WebDriverException):
+                        pass
+
+                if not username:
+                    # Last resort: extract numeric user_id from sessionid prefix
+                    m = _re.match(r"^(\d+)", sessionid)
+                    username = m.group(1) if m else ds_user_id
+
+                driver.quit()
+
+                # ── Build instagrapi session WITHOUT any private-API round-trip ──
+                # set_settings() + init() wires up the HTTP client; we deliberately
+                # skip login_by_sessionid() to avoid the version-gated user_info_v1 call.
+                cl = Client()
+                cl.delay_range = [1, 3]
+                cl.set_settings({
+                    "cookies": cookies,
+                    "authorization_data": {
+                        "ds_user_id": ds_user_id,
+                        "sessionid": sessionid,
+                        "should_use_header_over_cookies": "1",
+                    },
+                })
+                cl.user_id = int(ds_user_id) if ds_user_id.isdigit() else 0
+                cl.username = username
+
+                settings = cl.get_settings()
+                # Store username/user_id in the settings blob so we can recover them later
+                settings["_af_username"] = username
+                settings["_af_user_id"] = ds_user_id
+
+                return {
+                    "ok": True,
+                    "username": username,
+                    "user_id": ds_user_id,
+                    "session": settings,
+                }
+
+            except WebDriverException:
+                return {"ok": False, "error": "Browser window was closed before login completed."}
+
+        driver.quit()
+        return {"ok": False, "error": "Timed out waiting for Instagram login. Please try again."}
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        try:
+            driver.quit()
+        except Exception:
+            pass
+        return {"ok": False, "error": f"Browser login error: {type(e).__name__}: {e}"}
 
 
 def rpc_challenge(username: str, password: str, code: str) -> dict:
@@ -837,6 +1043,10 @@ def handle_json_rpc() -> None:
                 str(payload.get("username", "")),
                 str(payload.get("password", "")),
             )
+        elif cmd == "login_by_sessionid":
+            result = rpc_login_by_sessionid(str(payload.get("sessionid", "")))
+        elif cmd == "browser_login":
+            result = rpc_browser_login(int(payload.get("timeout_seconds", 300)))
         elif cmd == "challenge":
             result = rpc_challenge(
                 str(payload.get("username", "")),
@@ -853,8 +1063,10 @@ def handle_json_rpc() -> None:
     except SystemExit:
         # Catch any sys.exit() from inner functions and convert to JSON error.
         pass
-    except Exception:
-        pass
+    except Exception as e:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        result = {"ok": False, "error": f"Unexpected error: {type(e).__name__}: {e}"}
     finally:
         sys.stdout = real_stdout
         print(json.dumps(result, default=str), flush=True)
