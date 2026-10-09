@@ -109,6 +109,11 @@ create policy "stripe_customer_events: owner read"
   on public.stripe_customer_events for select
   using (auth.uid() = user_id);
 
+-- Explicitly block direct user inserts — only service-role (checkout/webhook) may write.
+create policy "stripe_customer_events: no direct user insert"
+  on public.stripe_customer_events for insert
+  with check (false);
+
 create or replace view public.v_stripe_customer as
 select distinct on (user_id)
   user_id,

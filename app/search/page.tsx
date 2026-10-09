@@ -63,6 +63,9 @@ interface SearchRecord {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
+// Set NEXT_PUBLIC_BILLING_GATE_ENABLED=true in env to show the upgrade wall.
+const BILLING_GATE_ENABLED = process.env.NEXT_PUBLIC_BILLING_GATE_ENABLED === 'true'
+
 const SEARCH_TYPES: { value: SearchType; label: string; icon: typeof Search }[] = [
   { value: 'top', label: 'Top Posts', icon: Sparkles },
   { value: 'reel', label: 'Reels', icon: Film },
@@ -639,84 +642,81 @@ export default function SearchPage() {
 
         {/* Results */}
         <div className="flex flex-1 flex-col overflow-y-auto">
-          {/* Upgrade wall — shown when billing not yet loaded as active */}
-          {billing !== null && !billing.active && (
+          {BILLING_GATE_ENABLED && billing !== null && !billing.active ? (
             <UpgradeWall onUpgrade={startCheckout} loading={checkoutLoading} />
-          )}
+          ) : !BILLING_GATE_ENABLED || billing?.active ? (
+            <div className="flex-1 px-6 py-6">
+              {error && (
+                <div className="mb-4">
+                  <ErrorBanner message={error} onDismiss={() => setError(null)} />
+                </div>
+              )}
 
-          {billing?.active && (
-          <div className="flex-1 px-6 py-6">
-          {error && (
-            <div className="mb-4">
-              <ErrorBanner message={error} onDismiss={() => setError(null)} />
-            </div>
-          )}
+              {/* Loading */}
+              {loading && (
+                <div className="flex flex-col items-center gap-3 py-24 text-center">
+                  <div className="relative flex size-14 items-center justify-center rounded-full bg-[#eef1f5]">
+                    <div className="absolute inset-0 animate-spin rounded-full border-2 border-transparent border-t-[#17202b]" />
+                    <Sparkles className="size-6 text-[#17202b]" />
+                  </div>
+                  <p className="text-sm font-medium text-[#657180]">Searching Instagram…</p>
+                  <p className="text-xs text-[#a3acb7]">This may take a moment.</p>
+                </div>
+              )}
 
-          {/* Loading */}
-          {loading && (
-            <div className="flex flex-col items-center gap-3 py-24 text-center">
-              <div className="relative flex size-14 items-center justify-center rounded-full bg-[#eef1f5]">
-                <div className="absolute inset-0 animate-spin rounded-full border-2 border-transparent border-t-[#17202b]" />
-                <Sparkles className="size-6 text-[#17202b]" />
-              </div>
-              <p className="text-sm font-medium text-[#657180]">Searching Instagram…</p>
-              <p className="text-xs text-[#a3acb7]">This may take a moment.</p>
-            </div>
-          )}
+              {/* Results grid */}
+              {!loading && activeRecord && (
+                <>
+                  <div className="mb-4 flex items-center justify-between">
+                    <div>
+                      <h2 className="text-base font-semibold tracking-tight">
+                        &ldquo;{activeRecord.query}&rdquo;
+                      </h2>
+                      <p className="mt-0.5 text-xs text-[#7a8593]">
+                        {posts.length} of {activeRecord.limit} requested ·{' '}
+                        {activeRecord.search_type} ·{' '}
+                        {timeAgo(activeRecord.timestamp)}
+                      </p>
+                    </div>
+                  </div>
 
-          {/* Results grid */}
-          {!loading && activeRecord && (
-            <>
-              <div className="mb-4 flex items-center justify-between">
-                <div>
-                  <h2 className="text-base font-semibold tracking-tight">
-                    &ldquo;{activeRecord.query}&rdquo;
-                  </h2>
-                  <p className="mt-0.5 text-xs text-[#7a8593]">
-                    {posts.length} of {activeRecord.limit} requested ·{' '}
-                    {activeRecord.search_type} ·{' '}
-                    {timeAgo(activeRecord.timestamp)}
+                  {posts.length === 0 ? (
+                    <div className="rounded-2xl border border-dashed border-[#d9dfe6] bg-white px-6 py-16 text-center">
+                      <Search className="mx-auto mb-3 size-8 text-[#c8cdd3]" />
+                      <p className="text-sm font-medium text-[#657180]">No posts found.</p>
+                      <p className="mt-1 text-xs text-[#a3acb7]">Try a different query or search type.</p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+                      {posts.map((post, i) => (
+                        <PostCard key={`${activeRecord.id}-${i}`} post={post} />
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+
+              {/* Empty state */}
+              {!loading && !activeRecord && !error && (
+                <div className="flex flex-col items-center gap-3 py-28 text-center">
+                  <div className="flex size-14 items-center justify-center rounded-2xl bg-[#eef1f5]">
+                    <Search className="size-7 text-[#c8cdd3]" />
+                  </div>
+                  <p className="text-sm font-medium text-[#657180]">
+                    Search for posts, reels, or carousels.
                   </p>
+                  {!igAccount?.connected && (
+                    <button
+                      onClick={() => setAccountModalOpen(true)}
+                      className="mt-1 rounded-lg bg-[#17202b] px-4 py-2 text-xs font-semibold text-white hover:bg-[#2b3948]"
+                    >
+                      Connect Instagram to start searching
+                    </button>
+                  )}
                 </div>
-              </div>
-
-              {posts.length === 0 ? (
-                <div className="rounded-2xl border border-dashed border-[#d9dfe6] bg-white px-6 py-16 text-center">
-                  <Search className="mx-auto mb-3 size-8 text-[#c8cdd3]" />
-                  <p className="text-sm font-medium text-[#657180]">No posts found.</p>
-                  <p className="mt-1 text-xs text-[#a3acb7]">Try a different query or search type.</p>
-                </div>
-              ) : (
-                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
-                  {posts.map((post, i) => (
-                    <PostCard key={`${activeRecord.id}-${i}`} post={post} />
-                  ))}
-                </div>
-              )}
-            </>
-          )}
-
-          {/* Empty state */}
-          {!loading && !activeRecord && !error && (
-            <div className="flex flex-col items-center gap-3 py-28 text-center">
-              <div className="flex size-14 items-center justify-center rounded-2xl bg-[#eef1f5]">
-                <Search className="size-7 text-[#c8cdd3]" />
-              </div>
-              <p className="text-sm font-medium text-[#657180]">
-                Search for posts, reels, or carousels.
-              </p>
-              {!igAccount?.connected && (
-                <button
-                  onClick={() => setAccountModalOpen(true)}
-                  className="mt-1 rounded-lg bg-[#17202b] px-4 py-2 text-xs font-semibold text-white hover:bg-[#2b3948]"
-                >
-                  Connect Instagram to start searching
-                </button>
               )}
             </div>
-          )}
-          </div>
-          )}
+          ) : null}
         </div>
       </main>
 

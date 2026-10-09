@@ -751,9 +751,11 @@ def rpc_login(username: str, password: str) -> dict:
         BadCredentials,
         BadPassword,
         ChallengeRequired,
+        ClientThrottledError,
         FeedbackRequired,
         LoginRequired,
         PleaseWaitFewMinutes,
+        RateLimitError,
         SentryBlock,
         TwoFactorRequired,
         UnknownError,
@@ -780,11 +782,13 @@ def rpc_login(username: str, password: str) -> dict:
             "error": "Instagram requires a verification code.",
         }
     except (BadPassword, BadCredentials, UserNotFound, LoginRequired):
-        return {"ok": False, "error": "Authentication failed."}
+        return {"ok": False, "error": "Authentication failed. Check your username and password."}
     except TwoFactorRequired:
         return {"ok": False, "error": "Two-factor authentication is required. Disable it or use an app password."}
     except FeedbackRequired:
-        return {"ok": False, "error": "Authentication failed."}
+        return {"ok": False, "error": "Instagram blocked this login attempt. Try again later or use the browser login."}
+    except (ClientThrottledError, RateLimitError):
+        return {"ok": False, "error": "Instagram is rate-limiting login attempts. Wait 10–30 minutes and try again."}
     except (SentryBlock, PleaseWaitFewMinutes):
         return {"ok": False, "error": "Instagram is temporarily blocking automated access. Wait a few minutes and try again."}
     except UnknownError as e:

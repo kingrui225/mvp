@@ -45,9 +45,13 @@ export async function POST(req: NextRequest) {
   }
 
   // ── Subscription guard ────────────────────────────────────────────────────
-  const hasSub = await hasActiveSubscription(user.id)
-  if (!hasSub) {
-    return NextResponse.json({ error: 'subscription_required' }, { status: 402 })
+  // Set BILLING_GATE_ENABLED=true in env to enforce subscriptions.
+  const gateEnabled = process.env.BILLING_GATE_ENABLED === 'true'
+  if (gateEnabled) {
+    const hasSub = await hasActiveSubscription(user.id)
+    if (!hasSub) {
+      return NextResponse.json({ error: 'subscription_required' }, { status: 402 })
+    }
   }
 
   // ── Input validation ──────────────────────────────────────────────────────
