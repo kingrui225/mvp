@@ -1,12 +1,19 @@
 /**
  * DELETE /api/instagram/disconnect
  *
- * Append-only disconnect: inserts a new row in instagram_accounts with
- * status='disconnected'. Never deletes or updates existing rows.
+ * 1. Fetches the stored session blob and calls rpc_logout so Instagram
+ *    invalidates the token server-side — preventing orphaned active sessions
+ *    even if the encrypted blob were ever compromised.
+ * 2. Inserts a 'disconnected' row in instagram_accounts (append-only).
+ *
+ * Logout is best-effort: if it fails we still complete the disconnect.
  */
 import { NextResponse } from 'next/server'
 import { requireUser } from '@/lib/auth'
 import { createClient } from '@/lib/supabase/server'
+import { createAdminClient } from '@/lib/supabase/admin'
+import { decrypt } from '@/lib/encrypt'
+import { runInstagramCommand } from '@/lib/instagram'
 
 export async function DELETE() {
   const { user, error } = await requireUser()
@@ -14,7 +21,7 @@ export async function DELETE() {
 
   const supabase = await createClient()
 
-  // Find the currently active account for this user.
+  // ── 1. Find the currently active account ─────────────────────────────────
   const { data: active } = await supabase
     .from('instagram_accounts')
     .select('ig_user_id, ig_username')
@@ -24,7 +31,30 @@ export async function DELETE() {
     .limit(1)
     .maybeSingle()
 
-  // Insert a disconnected event. If no active account, still succeeds idempotently.
+  // ── 2. Fetch + decrypt stored session, then logout on Instagram ───────────
+  try {
+    const admin = createAdminClient()
+    const { data: sessionRow } = await admin
+      .from('instagram_session_events')
+      .select('session_blob')
+      .eq('user_id', user.id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+
+    if (sessionRow?.session_blob) {
+      const session = JSON.parse(decrypt(sessionRow.session_blob)) as Record<string, unknown>
+      // Best-effort — don't await failure; always proceed to disconnect record
+      const logoutResult = await runInstagramCommand({ cmd: 'logout', session }, 15_000)
+      console.log('[disconnect] logout result:', logoutResult.ok,
+        'warning' in logoutResult ? logoutResult.warning : '')
+    }
+  } catch (logoutErr) {
+    // Non-fatal — log and continue
+    console.error('[disconnect] logout best-effort failed:', logoutErr)
+  }
+
+  // ── 3. Insert disconnect event (append-only) ──────────────────────────────
   const { error: insertError } = await supabase.from('instagram_accounts').insert({
     user_id: user.id,
     ig_user_id: active?.ig_user_id ?? null,

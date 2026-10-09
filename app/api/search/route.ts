@@ -82,11 +82,25 @@ export async function POST(req: NextRequest) {
   const admin = createAdminClient()
   const { data: sessionRow } = await admin
     .from('instagram_session_events')
-    .select('session_blob')
+    .select('session_blob, created_at')
     .eq('user_id', user.id)
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle()
+
+  // ── Session expiry: reject tokens older than 30 days ─────────────────────
+  const SESSION_MAX_DAYS = 30
+  if (sessionRow?.created_at) {
+    const ageMs = Date.now() - new Date(sessionRow.created_at).getTime()
+    const ageDays = ageMs / (1000 * 60 * 60 * 24)
+    if (ageDays > SESSION_MAX_DAYS) {
+      console.warn('[search] session expired age_days=%.1f user=%s', ageDays, user.id)
+      return NextResponse.json(
+        { error: 'Your Instagram session has expired. Please reconnect your account.', code: 'SESSION_EXPIRED' },
+        { status: 401 },
+      )
+    }
+  }
 
   let sessionData: Record<string, unknown> | null = null
   if (sessionRow?.session_blob) {
@@ -95,6 +109,7 @@ export async function POST(req: NextRequest) {
     } catch {
       // Decryption failure — session is corrupt; continue without session
       // (search will fail at the Python layer with a clear error).
+      console.error('[search] session blob decryption failed for user=%s', user.id)
     }
   }
 

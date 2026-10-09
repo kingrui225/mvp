@@ -17,6 +17,7 @@ export type IgCommand =
   | { cmd: 'browser_login'; timeout_seconds?: number }
   | { cmd: 'login_by_sessionid'; sessionid: string }
   | { cmd: 'challenge'; username: string; password: string; code: string }
+  | { cmd: 'logout'; session: Record<string, unknown> }
   | { cmd: 'search'; query: string; search_type: string; limit: number; session?: Record<string, unknown> }
 
 export interface IgSuccess {

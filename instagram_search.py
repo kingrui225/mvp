@@ -992,6 +992,27 @@ def rpc_challenge(username: str, password: str, code: str) -> dict:
         return {"ok": False, "error": "Verification failed. Check the code and try again."}
 
 
+def rpc_logout(session: dict) -> dict:
+    """
+    Best-effort logout — invalidates the session on Instagram's servers so the
+    stored token can no longer be used even if the encrypted blob is compromised.
+    Always returns ok=True; a logout failure is logged but never blocks disconnect.
+    """
+    from instagrapi import Client
+    try:
+        if not session:
+            return {"ok": True, "note": "no session provided, skipping logout"}
+        cl = Client()
+        cl.set_settings(session)
+        cl.logout()
+        print("[rpc_logout] session invalidated on Instagram servers", flush=True)
+        return {"ok": True}
+    except Exception as e:
+        # Best-effort: we still disconnect from our side regardless
+        print(f"[rpc_logout] best-effort logout failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        return {"ok": True, "warning": f"Could not confirm logout: {type(e).__name__}"}
+
+
 def rpc_search(payload: dict) -> dict:
     """
     Run a search using a caller-supplied session dict (pre-decrypted by TypeScript).

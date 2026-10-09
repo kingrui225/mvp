@@ -77,6 +77,8 @@ class handler(BaseHTTPRequestHandler):
                     str(payload.get("password", "")),
                     str(payload.get("code", "")),
                 )
+            elif cmd == "logout":
+                result = ig.rpc_logout(payload.get("session", {}))
             elif cmd == "search":
                 result = ig.rpc_search(payload)
             elif cmd == "browser_login":

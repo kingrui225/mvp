@@ -365,6 +365,12 @@ export default function SearchPage() {
           setBilling((b) => b ? { ...b, active: false } : { active: false, status: null, current_period_end: null, has_customer: false })
           return
         }
+        if (res.status === 401 && data.code === 'SESSION_EXPIRED') {
+          // Instagram session is too old — prompt reconnect without showing a raw error
+          setIgAccount({ connected: false, username: null, user_id: null, created_at: null })
+          setError('Your Instagram session has expired. Please reconnect your account using the account menu above.')
+          return
+        }
         if (!res.ok) {
           setError(data.error ?? 'Search failed.')
         } else {
