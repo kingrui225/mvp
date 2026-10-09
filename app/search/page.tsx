@@ -1,8 +1,5 @@
 'use client'
 
-// Never statically prerender — uses Supabase + billing status at runtime
-export const dynamic = 'force-dynamic'
-
 import {
   AtSign,
   Clock,
@@ -277,7 +274,6 @@ export default function SearchPage() {
   const [accountModalOpen, setAccountModalOpen] = useState(false)
   const [billing, setBilling] = useState<BillingStatus | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
-  const supabase = createClient()
 
   // ── Load history + Instagram status + billing on mount ───────────────────
   useEffect(() => {
@@ -319,7 +315,8 @@ export default function SearchPage() {
 
   // ── Supabase sign out ─────────────────────────────────────────────────────
   async function handleSignOut() {
-    await supabase.auth.signOut()
+    // createClient() called here so it only runs in the browser, never during SSR
+    await createClient().auth.signOut()
     window.location.href = '/login'
   }
 

@@ -1,9 +1,5 @@
 'use client'
 
-// Never statically prerender — this page calls Supabase at render time
-// and env vars must be available at runtime, not baked in at build.
-export const dynamic = 'force-dynamic'
-
 import { createClient } from '@/lib/supabase/client'
 import { Sparkles } from 'lucide-react'
 import { useRouter } from 'next/navigation'
@@ -20,13 +16,13 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
 
-  const supabase = createClient()
-
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
     setLoading(true)
     setError(null)
     setMessage(null)
+    // createClient() called here so it only runs in the browser, never during SSR
+    const supabase = createClient()
 
     try {
       if (mode === 'signin') {
