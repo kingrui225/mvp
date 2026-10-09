@@ -1,0 +1,5 @@
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+instagrapi>=3.0.0,<4.0.0
+pydantic>=2.0.0,<3.0.0
+selenium>=4.15.0
