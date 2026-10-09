@@ -160,11 +160,20 @@ export function runInstagramCommand(payload: IgCommand, timeoutMs = 90_000): Pro
   // INSTAGRAM_API_URL can also be set explicitly (e.g. for Railway worker).
   // VERCEL_URL is set automatically by Vercel (no protocol, no trailing slash).
   // INSTAGRAM_API_URL overrides everything (e.g. Railway worker).
-  const vercelInternalUrl = process.env.VERCEL_URL
+  // VERCEL_URL is the deployment-specific URL (e.g. mvp-abc123.vercel.app) which is
+  // protected by Vercel SSO when Deployment Protection is enabled — it will 401.
+  // VERCEL_PROJECT_PRODUCTION_URL is the stable production alias; also may be protected.
+  // INSTAGRAM_API_URL should be set to the custom domain (e.g. https://search.agenticfruit.com/api/ig)
+  // to bypass SSO protection entirely.
+  const vercelInternalUrl = process.env.VERCEL_PROJECT_PRODUCTION_URL
+    ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}/api/ig`
+    : process.env.VERCEL_URL
     ? `https://${process.env.VERCEL_URL}/api/ig`
     : null
 
   const workerUrl = process.env.INSTAGRAM_API_URL ?? vercelInternalUrl
+  console.log('[instagram.ts] workerUrl=%s INSTAGRAM_API_URL=%s VERCEL_URL=%s VERCEL_PROJECT_PRODUCTION_URL=%s',
+    workerUrl, process.env.INSTAGRAM_API_URL ?? '(unset)', process.env.VERCEL_URL ?? '(unset)', process.env.VERCEL_PROJECT_PRODUCTION_URL ?? '(unset)')
 
   if (workerUrl) {
     return runViaHttp(payload, timeoutMs, workerUrl)
