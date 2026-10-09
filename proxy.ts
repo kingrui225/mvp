@@ -1,5 +1,5 @@
 /**
- * Next.js middleware — runs on every request that matches the config.
+ * Next.js proxy (formerly middleware) — runs on every request that matches the config.
  *
  * Responsibilities:
  *  1. Refresh the Supabase session cookie so it stays alive across navigation.

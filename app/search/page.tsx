@@ -1,5 +1,8 @@
 'use client'
 
+// Never statically prerender — uses Supabase + billing status at runtime
+export const dynamic = 'force-dynamic'
+
 import {
   AtSign,
   Clock,

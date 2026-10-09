@@ -1,5 +1,9 @@
 'use client'
 
+// Never statically prerender — this page calls Supabase at render time
+// and env vars must be available at runtime, not baked in at build.
+export const dynamic = 'force-dynamic'
+
 import { createClient } from '@/lib/supabase/client'
 import { Sparkles } from 'lucide-react'
 import { useRouter } from 'next/navigation'
