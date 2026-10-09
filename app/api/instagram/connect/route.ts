@@ -43,7 +43,7 @@ export async function POST(req: NextRequest) {
   const { user, error } = await requireUser()
   if (error) return error
 
-  let body: { method?: string; username?: string; password?: string }
+  let body: { method?: string; username?: string; password?: string; sessionid?: string }
   try {
     body = await req.json()
   } catch {
@@ -51,6 +51,43 @@ export async function POST(req: NextRequest) {
   }
 
   const ipHash = hashIp(clientIp(req.headers))
+
+  // ── Session ID login ─────────────────────────────────────────────────────────
+  if (body.method === 'sessionid') {
+    const sessionid = (body.sessionid ?? '').trim()
+    if (!sessionid || sessionid.length > 512) {
+      return NextResponse.json({ error: 'Invalid session ID.' }, { status: 400 })
+    }
+
+    const limited = await checkRateLimit({ userId: user.id, ipHash, action: 'ig_connect' })
+    if (!limited.ok) return NextResponse.json({ error: limited.error }, { status: limited.status })
+
+    try {
+      console.log('[ig/connect] sessionid login attempt')
+      const result = await runInstagramCommand({ cmd: 'login_by_sessionid', sessionid })
+
+      if (!result.ok) {
+        const failure = result as IgFailure
+        console.error('[ig/connect] sessionid failed code=%s internal=%s', failure.code, failure._internalError ?? failure.error)
+        await recordRateLimit({ userId: user.id, ipHash, action: 'ig_connect', success: false })
+        return NextResponse.json({ ok: false, error: failure.error }, { status: 401 })
+      }
+      if (!result.session) {
+        await recordRateLimit({ userId: user.id, ipHash, action: 'ig_connect', success: false })
+        return NextResponse.json({ ok: false, error: GENERIC_AUTH_ERROR }, { status: 500 })
+      }
+
+      const saved = await persistSession(user.id, result, result.username ?? 'instagram')
+      if (!saved.ok) {
+        await recordRateLimit({ userId: user.id, ipHash, action: 'ig_connect', success: false })
+        return NextResponse.json({ ok: false, error: GENERIC_AUTH_ERROR }, { status: 500 })
+      }
+      await recordRateLimit({ userId: user.id, ipHash, action: 'ig_connect', success: true })
+      return NextResponse.json({ ok: true, username: saved.username, user_id: saved.user_id })
+    } finally {
+      body.sessionid = ''
+    }
+  }
 
   // ── Browser login (Selenium popup) ──────────────────────────────────────────
   if (body.method === 'browser') {

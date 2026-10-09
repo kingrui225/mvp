@@ -1,6 +1,6 @@
 'use client'
 
-import { AtSign, Globe, KeyRound, X } from 'lucide-react'
+import { AtSign, Globe, Hash, KeyRound, X } from 'lucide-react'
 import { FormEvent, useEffect, useState } from 'react'
 
 export interface InstagramStatus {
@@ -20,13 +20,14 @@ interface Props {
 // Browser login (Selenium) is only available in local dev — not on Vercel.
 const BROWSER_LOGIN_AVAILABLE = process.env.NEXT_PUBLIC_BROWSER_LOGIN === 'true'
 
-type ConnectMethod = 'browser' | 'credentials'
+type ConnectMethod = 'browser' | 'credentials' | 'sessionid'
 
 export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Props) {
-  const [method, setMethod] = useState<ConnectMethod>('credentials')
+  const [method, setMethod] = useState<ConnectMethod>('sessionid')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [code, setCode] = useState('')
+  const [sessionid, setSessionid] = useState('')
   const [challengeRequired, setChallengeRequired] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -36,9 +37,10 @@ export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Pr
       setUsername('')
       setPassword('')
       setCode('')
+      setSessionid('')
       setChallengeRequired(false)
       setError(null)
-      setMethod('credentials')
+      setMethod('sessionid')
     }
   }, [open])
 
@@ -99,6 +101,30 @@ export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Pr
       }
       setPassword('')
       setCode('')
+      await refreshStatus()
+    } catch {
+      setError('Could not reach the server. Check your connection and try again.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function handleSessionIdConnect(e: FormEvent) {
+    e.preventDefault()
+    setLoading(true)
+    setError(null)
+    try {
+      const res = await fetch('/api/instagram/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ method: 'sessionid', sessionid }),
+      })
+      const data = await res.json()
+      if (!res.ok || data.ok === false) {
+        setError(data.error ?? 'Could not connect Instagram.')
+        return
+      }
+      setSessionid('')
       await refreshStatus()
     } catch {
       setError('Could not reach the server. Check your connection and try again.')
@@ -171,24 +197,68 @@ export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Pr
 
           {!account?.connected && (
             <div className="mt-4 flex flex-col gap-3">
-              {/* Method tabs — browser login only shown when available (local dev) */}
-              {BROWSER_LOGIN_AVAILABLE && (
-                <div className="flex rounded-xl border border-[#e1e5ea] bg-[#f8f9fb] p-1">
+              {/* Method tabs */}
+              <div className="flex rounded-xl border border-[#e1e5ea] bg-[#f8f9fb] p-1">
+                <button
+                  onClick={() => { setMethod('sessionid'); setError(null) }}
+                  className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg py-2 text-xs font-semibold transition ${method === 'sessionid' ? 'bg-white text-[#17202b] shadow-sm' : 'text-[#8994a1] hover:text-[#657180]'}`}
+                >
+                  <Hash className="size-3.5" />
+                  Session ID
+                </button>
+                <button
+                  onClick={() => { setMethod('credentials'); setError(null); setChallengeRequired(false) }}
+                  className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg py-2 text-xs font-semibold transition ${method === 'credentials' ? 'bg-white text-[#17202b] shadow-sm' : 'text-[#8994a1] hover:text-[#657180]'}`}
+                >
+                  <KeyRound className="size-3.5" />
+                  Password
+                </button>
+                {BROWSER_LOGIN_AVAILABLE && (
                   <button
                     onClick={() => { setMethod('browser'); setError(null) }}
                     className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg py-2 text-xs font-semibold transition ${method === 'browser' ? 'bg-white text-[#17202b] shadow-sm' : 'text-[#8994a1] hover:text-[#657180]'}`}
                   >
                     <Globe className="size-3.5" />
-                    Browser login
+                    Browser
                   </button>
+                )}
+              </div>
+
+              {/* Session ID panel */}
+              {method === 'sessionid' && (
+                <form onSubmit={handleSessionIdConnect} className="flex flex-col gap-3">
+                  <div className="rounded-xl border border-[#e1e5ea] bg-[#f8f9fb] px-3.5 py-3 text-xs text-[#657180] leading-relaxed">
+                    <p className="font-semibold text-[#273442] mb-1">How to get your Session ID</p>
+                    <ol className="list-decimal list-inside space-y-1">
+                      <li>Open Instagram in Chrome on your computer</li>
+                      <li>Press <span className="font-mono bg-white border border-[#e1e5ea] rounded px-1">F12</span> → Application → Cookies → <span className="font-mono">instagram.com</span></li>
+                      <li>Find the cookie named <span className="font-mono bg-white border border-[#e1e5ea] rounded px-1">sessionid</span> and copy its value</li>
+                    </ol>
+                  </div>
+                  <input
+                    value={sessionid}
+                    onChange={(e) => setSessionid(e.target.value)}
+                    placeholder="Paste sessionid cookie value"
+                    autoComplete="off"
+                    required
+                    className="rounded-xl border border-[#d9dfe6] bg-[#f8f9fb] px-3.5 py-2.5 text-sm font-mono outline-none focus:border-[#17202b] focus:bg-white"
+                  />
                   <button
-                    onClick={() => { setMethod('credentials'); setError(null); setChallengeRequired(false) }}
-                    className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg py-2 text-xs font-semibold transition ${method === 'credentials' ? 'bg-white text-[#17202b] shadow-sm' : 'text-[#8994a1] hover:text-[#657180]'}`}
+                    type="submit"
+                    disabled={loading}
+                    className="flex items-center justify-center gap-2 rounded-xl bg-[#17202b] py-2.5 text-sm font-semibold text-white transition hover:bg-[#2b3948] disabled:opacity-60"
                   >
-                    <KeyRound className="size-3.5" />
-                    Credentials
+                    {loading ? (
+                      <span className="size-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                    ) : (
+                      <Hash className="size-4" />
+                    )}
+                    {loading ? 'Connecting…' : 'Connect with Session ID'}
                   </button>
-                </div>
+                  <p className="text-center text-xs text-[#8994a1]">
+                    The session ID is never stored as plaintext — it&apos;s encrypted before saving.
+                  </p>
+                </form>
               )}
 
               {/* Browser login panel */}
