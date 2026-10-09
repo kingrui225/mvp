@@ -201,6 +201,12 @@ export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Pr
               {/* ── Credentials panel (default) ───────────────────────────── */}
               {method === 'credentials' && (
                 <form onSubmit={handleCredentialsConnect} autoComplete="off" className="flex flex-col gap-3">
+                  <div className="rounded-xl border border-[#e8ecf0] bg-[#f8f9fb] px-3.5 py-2.5 text-xs text-[#657180] leading-relaxed">
+                    <span className="font-semibold text-[#273442]">Security note: </span>
+                    Your password is sent over HTTPS and used only once to create a session token — it is never stored.
+                    The session token is encrypted before saving and expires after 30 days.
+                    You can revoke access at any time by disconnecting here or logging out of Instagram in your browser.
+                  </div>
                   <input
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
@@ -280,6 +286,11 @@ export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Pr
                     )}
                     {loading ? 'Connecting…' : 'Connect with Session ID'}
                   </button>
+                  <p className="text-xs text-[#8994a1] leading-relaxed">
+                    <span className="font-semibold text-[#657180]">Security: </span>
+                    The session ID grants full account access. It is encrypted before storage, never logged, and expires after 30 days.
+                    Disconnecting here also invalidates it on Instagram&apos;s servers.
+                  </p>
                 </form>
               )}
 
