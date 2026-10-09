@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireUser } from '@/lib/auth'
 import { checkRateLimit, clientIp, hashIp, recordRateLimit } from '@/lib/rate-limit'
 import { encrypt } from '@/lib/encrypt'
-import { runInstagramCommand } from '@/lib/instagram'
+import { runInstagramCommand, IgFailure } from '@/lib/instagram'
 import { createClient } from '@/lib/supabase/server'
 import { createAdminClient } from '@/lib/supabase/admin'
 
@@ -35,8 +35,10 @@ export async function POST(req: NextRequest) {
   try {
     const result = await runInstagramCommand({ cmd: 'challenge', username, password, code })
     if (!result.ok || !result.session) {
+      const failure = result as IgFailure
+      console.error('[ig/challenge] failed code=%s internal=%s', failure.code, failure._internalError ?? failure.error)
       await recordRateLimit({ userId: user.id, ipHash, action: 'ig_challenge', success: false })
-      return NextResponse.json({ ok: false, error: GENERIC_AUTH_ERROR }, { status: 401 })
+      return NextResponse.json({ ok: false, error: result.ok ? GENERIC_AUTH_ERROR : failure.error }, { status: 401 })
     }
 
     const supabase = await createClient()

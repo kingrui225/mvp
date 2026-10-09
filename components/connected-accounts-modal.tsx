@@ -66,7 +66,7 @@ export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Pr
       }
       await refreshStatus()
     } catch {
-      setError('Network error — could not reach the server.')
+      setError('Could not reach the server. Check your connection and try again.')
     } finally {
       setLoading(false)
     }
@@ -101,7 +101,7 @@ export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Pr
       setCode('')
       await refreshStatus()
     } catch {
-      setError('Network error — could not reach the server.')
+      setError('Could not reach the server. Check your connection and try again.')
     } finally {
       setLoading(false)
     }
@@ -119,7 +119,7 @@ export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Pr
       }
       onChanged({ connected: false, username: null, user_id: null, created_at: null })
     } catch {
-      setError('Network error — could not reach the server.')
+      setError('Could not reach the server. Check your connection and try again.')
     } finally {
       setLoading(false)
     }

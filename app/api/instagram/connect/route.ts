@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireUser } from '@/lib/auth'
 import { checkRateLimit, clientIp, hashIp, recordRateLimit } from '@/lib/rate-limit'
 import { encrypt } from '@/lib/encrypt'
-import { runInstagramCommand } from '@/lib/instagram'
+import { runInstagramCommand, IgFailure } from '@/lib/instagram'
 import { createClient } from '@/lib/supabase/server'
 import { createAdminClient } from '@/lib/supabase/admin'
 
@@ -61,8 +61,9 @@ export async function POST(req: NextRequest) {
     const result = await runInstagramCommand({ cmd: 'browser_login', timeout_seconds: 300 }, 330_000)
 
     if (!result.ok) {
+      console.error('[ig/connect] browser_login failed code=%s internal=%s', (result as IgFailure).code, (result as IgFailure)._internalError ?? result.error)
       await recordRateLimit({ userId: user.id, ipHash, action: 'ig_connect', success: false })
-      return NextResponse.json({ ok: false, error: result.error ?? GENERIC_AUTH_ERROR }, { status: 401 })
+      return NextResponse.json({ ok: false, error: result.error }, { status: 401 })
     }
     if (!result.session) {
       await recordRateLimit({ userId: user.id, ipHash, action: 'ig_connect', success: false })
@@ -94,18 +95,17 @@ export async function POST(req: NextRequest) {
   try {
     console.log('[ig/connect] calling runInstagramCommand login for', username)
     const result = await runInstagramCommand({ cmd: 'login', username, password })
-    console.log('[ig/connect] result ok=%s challenge=%s error=%s', result.ok, result.challenge_required, result.error)
 
     if (!result.ok) {
+      const failure = result as IgFailure
+      // Log full internal detail server-side only
+      console.error('[ig/connect] login failed code=%s internal=%s', failure.code, failure._internalError ?? failure.error)
       await recordRateLimit({ userId: user.id, ipHash, action: 'ig_connect', success: false })
-      if (result.challenge_required) {
-        return NextResponse.json({
-          ok: false,
-          challenge_required: true,
-          error: 'Instagram requires a verification code.',
-        })
+      if (failure.challenge_required) {
+        return NextResponse.json({ ok: false, challenge_required: true, error: failure.error })
       }
-      return NextResponse.json({ ok: false, error: result.error ?? GENERIC_AUTH_ERROR }, { status: 401 })
+      // result.error is already a safe, classified user message from classifyIgError
+      return NextResponse.json({ ok: false, error: failure.error }, { status: 401 })
     }
 
     if (!result.session) {
