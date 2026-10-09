@@ -93,4 +93,5 @@ class handler(BaseHTTPRequestHandler):
             traceback.print_exc()
             result = {"ok": False, "error": f"Worker error: {type(e).__name__}: {e}"}
 
+        print(f"[ig.py] result ok={result.get('ok')} error={result.get('error', '')[:120]}", flush=True)
         self._send_json(200, result)

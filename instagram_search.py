@@ -768,36 +768,44 @@ def rpc_login(username: str, password: str) -> dict:
     try:
         cl.login(username, password)
         settings = cl.get_settings()
+        print(f"[rpc_login] success username={username}", flush=True)
         return {
             "ok": True,
             "username": cl.username,
             "user_id": str(cl.user_id) if cl.user_id else None,
             "session": settings,
         }
-    except ChallengeRequired:
-        # Instagram sent a verification code to the user's email/phone.
+    except ChallengeRequired as e:
+        print(f"[rpc_login] ChallengeRequired: {e}", flush=True)
         return {
             "ok": False,
             "challenge_required": True,
             "error": "Instagram requires a verification code.",
         }
-    except (BadPassword, BadCredentials, UserNotFound, LoginRequired):
+    except (BadPassword, BadCredentials, UserNotFound, LoginRequired) as e:
+        print(f"[rpc_login] auth failed {type(e).__name__}: {e}", flush=True)
         return {"ok": False, "error": "Authentication failed. Check your username and password."}
-    except TwoFactorRequired:
+    except TwoFactorRequired as e:
+        print(f"[rpc_login] TwoFactorRequired: {e}", flush=True)
         return {"ok": False, "error": "Two-factor authentication is required. Disable it or use an app password."}
-    except FeedbackRequired:
+    except FeedbackRequired as e:
+        print(f"[rpc_login] FeedbackRequired: {e}", flush=True)
         return {"ok": False, "error": "Instagram blocked this login attempt. Try again later or use the browser login."}
-    except (ClientThrottledError, RateLimitError):
+    except (ClientThrottledError, RateLimitError) as e:
+        print(f"[rpc_login] rate-limited {type(e).__name__}: {e}", flush=True)
         return {"ok": False, "error": "Instagram is rate-limiting login attempts. Wait 10–30 minutes and try again."}
-    except (SentryBlock, PleaseWaitFewMinutes):
+    except (SentryBlock, PleaseWaitFewMinutes) as e:
+        print(f"[rpc_login] blocked {type(e).__name__}: {e}", flush=True)
         return {"ok": False, "error": "Instagram is temporarily blocking automated access. Wait a few minutes and try again."}
     except UnknownError as e:
         import traceback
         traceback.print_exc(file=sys.stderr)
+        print(f"[rpc_login] UnknownError: {e}", flush=True)
         return {"ok": False, "error": f"Instagram returned an unexpected error: {e}"}
     except Exception as e:
         import traceback
         traceback.print_exc(file=sys.stderr)
+        print(f"[rpc_login] unhandled {type(e).__name__}: {e}", flush=True)
         return {"ok": False, "error": f"Login error: {type(e).__name__}: {e}"}
 
 
@@ -817,17 +825,20 @@ def rpc_login_by_sessionid(sessionid: str) -> dict:
     try:
         cl.login_by_sessionid(sessionid)
         settings = cl.get_settings()
+        print(f"[rpc_login_by_sessionid] success username={cl.username}", flush=True)
         return {
             "ok": True,
             "username": cl.username,
             "user_id": str(cl.user_id) if cl.user_id else None,
             "session": settings,
         }
-    except (LoginRequired, BadCredentials):
-        return {"ok": False, "error": "Session ID is invalid or expired. Please get a fresh one."}
+    except (LoginRequired, BadCredentials) as e:
+        print(f"[rpc_login_by_sessionid] invalid/expired {type(e).__name__}: {e}", flush=True)
+        return {"ok": False, "error": "Session ID is invalid or expired. Please get a fresh one from your browser cookies."}
     except Exception as e:
         import traceback
         traceback.print_exc(file=sys.stderr)
+        print(f"[rpc_login_by_sessionid] unhandled {type(e).__name__}: {e}", flush=True)
         return {"ok": False, "error": f"Login error: {type(e).__name__}: {e}"}
 
 
