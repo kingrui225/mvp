@@ -507,8 +507,8 @@ export default function SearchPage() {
             )}
           </button>
 
-          {/* Billing section */}
-          <div className="border-t border-[#edf0f3]">
+          {/* Billing section — only shown when gate is enabled */}
+          {BILLING_GATE_ENABLED && <div className="border-t border-[#edf0f3]">
             {billing === null ? (
               // Loading skeleton
               <div className="flex items-center gap-2.5 px-4 py-3">
@@ -544,7 +544,7 @@ export default function SearchPage() {
                 </div>
               </button>
             )}
-          </div>
+          </div>}
 
           {/* App sign-out button — signs out of the page account (Supabase) */}
           <div className="border-t border-[#edf0f3]">

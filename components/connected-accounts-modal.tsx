@@ -23,7 +23,7 @@ const BROWSER_LOGIN_AVAILABLE = process.env.NEXT_PUBLIC_BROWSER_LOGIN === 'true'
 type ConnectMethod = 'browser' | 'credentials'
 
 export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Props) {
-  const [method, setMethod] = useState<ConnectMethod>(BROWSER_LOGIN_AVAILABLE ? 'browser' : 'credentials')
+  const [method, setMethod] = useState<ConnectMethod>('credentials')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [code, setCode] = useState('')
@@ -38,7 +38,7 @@ export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Pr
       setCode('')
       setChallengeRequired(false)
       setError(null)
-      setMethod('browser')
+      setMethod('credentials')
     }
   }, [open])
 
