@@ -12,7 +12,7 @@ import { type NextRequest, NextResponse } from 'next/server'
 const PUBLIC_ROUTES = ['/login', '/auth/callback', '/auth/confirm']
 const PUBLIC_API_ROUTES = ['/api/stripe/webhook']
 
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request })
 
   const supabase = createServerClient(
