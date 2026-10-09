@@ -13,8 +13,14 @@ import json
 import os
 import sys
 
-# Make instagram_search.py importable (it lives at the repo root)
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# On Vercel, instagram_search.py is bundled alongside this file via includeFiles.
+# Locally, it lives one level up. Try both locations.
+_here = os.path.dirname(os.path.abspath(__file__))
+_parent = os.path.dirname(_here)
+for _p in [_here, _parent]:
+    if os.path.exists(os.path.join(_p, "instagram_search.py")):
+        sys.path.insert(0, _p)
+        break
 
 import instagram_search as ig
 from http.server import BaseHTTPRequestHandler

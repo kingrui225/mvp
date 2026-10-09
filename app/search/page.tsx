@@ -3,6 +3,7 @@
 import {
   AtSign,
   Clock,
+  CreditCard,
   Film,
   Hash,
   Heart,
@@ -14,14 +15,23 @@ import {
   Search,
   Settings,
   Sparkles,
+  Star,
   Trash2,
   X,
+  Zap,
 } from 'lucide-react'
 import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { ConnectedAccountsModal, type InstagramStatus } from '@/components/connected-accounts-modal'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
+
+interface BillingStatus {
+  active: boolean
+  status: string | null
+  current_period_end: string | null
+  has_customer: boolean
+}
 
 type SearchType = 'top' | 'reel' | 'hashtag' | 'place'
 
@@ -188,6 +198,53 @@ function PostCard({ post }: { post: PostResult }) {
   )
 }
 
+function UpgradeWall({ onUpgrade, loading }: { onUpgrade: () => void; loading: boolean }) {
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center px-6 py-24 text-center">
+      <div className="mb-6 flex size-16 items-center justify-center rounded-2xl bg-gradient-to-br from-[#17202b] to-[#2b3948] shadow-lg">
+        <Zap className="size-8 text-white" />
+      </div>
+      <h2 className="text-xl font-bold tracking-tight text-[#17202b]">Unlock Instagram Search</h2>
+      <p className="mt-2 max-w-sm text-sm text-[#657180]">
+        Subscribe to run unlimited searches across posts, reels, hashtags, and places.
+      </p>
+
+      <ul className="mt-6 space-y-2 text-left text-sm text-[#273442]">
+        {[
+          'Unlimited hashtag & keyword searches',
+          'Top posts, reels, carousels & places',
+          'Up to 500 results per query',
+          'Full search history saved',
+        ].map((f) => (
+          <li key={f} className="flex items-center gap-2">
+            <Star className="size-3.5 shrink-0 text-[#17202b]" />
+            {f}
+          </li>
+        ))}
+      </ul>
+
+      <button
+        onClick={onUpgrade}
+        disabled={loading}
+        className="mt-8 flex items-center gap-2 rounded-xl bg-[#17202b] px-6 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-[#2b3948] disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#17202b] focus-visible:ring-offset-2"
+      >
+        {loading ? (
+          <>
+            <span className="size-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+            Redirecting…
+          </>
+        ) : (
+          <>
+            <CreditCard className="size-4" />
+            Subscribe — Get Started
+          </>
+        )}
+      </button>
+      <p className="mt-3 text-xs text-[#a3acb7]">Secure checkout via Stripe · Cancel anytime</p>
+    </div>
+  )
+}
+
 function ErrorBanner({ message, onDismiss }: { message: string; onDismiss: () => void }) {
   return (
     <div className="flex items-start gap-3 rounded-xl border border-[#f5c6c6] bg-[#fff5f5] px-4 py-3 text-sm text-[#9b2c2c]">
@@ -206,15 +263,17 @@ export default function SearchPage() {
   const [searchType, setSearchType] = useState<SearchType>('top')
   const [limit, setLimit] = useState(100)
   const [loading, setLoading] = useState(false)
+  const [checkoutLoading, setCheckoutLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [activeRecord, setActiveRecord] = useState<SearchRecord | null>(null)
   const [history, setHistory] = useState<SearchRecord[]>([])
   const [igAccount, setIgAccount] = useState<InstagramStatus | null>(null)
   const [accountModalOpen, setAccountModalOpen] = useState(false)
+  const [billing, setBilling] = useState<BillingStatus | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const supabase = createClient()
 
-  // ── Load history + Instagram status on mount ──────────────────────────────
+  // ── Load history + Instagram status + billing on mount ───────────────────
   useEffect(() => {
     fetch('/api/history')
       .then((r) => r.json())
@@ -228,12 +287,60 @@ export default function SearchPage() {
       .then((r) => r.json())
       .then((data: InstagramStatus) => setIgAccount(data))
       .catch(() => {})
+
+    fetch('/api/billing/status')
+      .then((r) => r.json())
+      .then((data: BillingStatus) => setBilling(data))
+      .catch(() => setBilling({ active: false, status: null, current_period_end: null, has_customer: false }))
+
+    // Handle post-checkout redirect
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('checkout') === 'success') {
+      // Poll until billing is confirmed active (webhook may be slightly delayed)
+      const poll = setInterval(async () => {
+        const r = await fetch('/api/billing/status')
+        const d: BillingStatus = await r.json()
+        setBilling(d)
+        if (d.active) clearInterval(poll)
+      }, 2000)
+      setTimeout(() => clearInterval(poll), 30_000) // give up after 30s
+      window.history.replaceState({}, '', '/search')
+    }
+    if (params.get('checkout') === 'cancel') {
+      window.history.replaceState({}, '', '/search')
+    }
   }, [])
 
   // ── Supabase sign out ─────────────────────────────────────────────────────
   async function handleSignOut() {
     await supabase.auth.signOut()
     window.location.href = '/login'
+  }
+
+  // ── Stripe checkout ───────────────────────────────────────────────────────
+  async function startCheckout() {
+    setCheckoutLoading(true)
+    try {
+      const r = await fetch('/api/stripe/checkout', { method: 'POST' })
+      const d = await r.json()
+      if (d.url) window.location.href = d.url
+      else setError(d.error ?? 'Could not start checkout.')
+    } finally {
+      setCheckoutLoading(false)
+    }
+  }
+
+  // ── Stripe portal ─────────────────────────────────────────────────────────
+  async function openPortal() {
+    setCheckoutLoading(true)
+    try {
+      const r = await fetch('/api/stripe/portal', { method: 'POST' })
+      const d = await r.json()
+      if (d.url) window.location.href = d.url
+      else setError(d.error ?? 'Could not open billing portal.')
+    } finally {
+      setCheckoutLoading(false)
+    }
   }
 
   // ── Search ────────────────────────────────────────────────────────────────
@@ -251,6 +358,10 @@ export default function SearchPage() {
           body: JSON.stringify({ query: q, search_type: searchType, limit }),
         })
         const data = await res.json()
+        if (res.status === 402) {
+          setBilling((b) => b ? { ...b, active: false } : { active: false, status: null, current_period_end: null, has_customer: false })
+          return
+        }
         if (!res.ok) {
           setError(data.error ?? 'Search failed.')
         } else {
@@ -393,6 +504,45 @@ export default function SearchPage() {
             )}
           </button>
 
+          {/* Billing section */}
+          <div className="border-t border-[#edf0f3]">
+            {billing === null ? (
+              // Loading skeleton
+              <div className="flex items-center gap-2.5 px-4 py-3">
+                <div className="size-7 animate-pulse rounded-full bg-[#edf0f3]" />
+                <div className="h-3 w-20 animate-pulse rounded bg-[#edf0f3]" />
+              </div>
+            ) : billing.active ? (
+              <button
+                onClick={openPortal}
+                disabled={checkoutLoading}
+                className="flex w-full items-center gap-2.5 px-4 py-3 transition hover:bg-[#f7f8fa] disabled:opacity-60"
+              >
+                <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-[#17202b]">
+                  <CreditCard className="size-3.5 text-white" />
+                </div>
+                <div className="min-w-0 flex-1 text-left">
+                  <p className="text-xs font-semibold text-[#273442]">Pro Plan</p>
+                  <p className="text-[10px] text-[#a3acb7]">Manage billing</p>
+                </div>
+              </button>
+            ) : (
+              <button
+                onClick={startCheckout}
+                disabled={checkoutLoading}
+                className="flex w-full items-center gap-2.5 px-4 py-3 transition hover:bg-[#f7f8fa] disabled:opacity-60"
+              >
+                <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[#17202b] to-[#2b3948]">
+                  <Zap className="size-3.5 text-white" />
+                </div>
+                <div className="min-w-0 flex-1 text-left">
+                  <p className="text-xs font-semibold text-[#273442]">Upgrade to Pro</p>
+                  <p className="text-[10px] text-[#a3acb7]">Unlock all searches</p>
+                </div>
+              </button>
+            )}
+          </div>
+
           {/* App sign-out button — signs out of the page account (Supabase) */}
           <div className="border-t border-[#edf0f3]">
             <button
@@ -488,7 +638,14 @@ export default function SearchPage() {
         </form>
 
         {/* Results */}
-        <div className="flex-1 overflow-y-auto px-6 py-6">
+        <div className="flex flex-1 flex-col overflow-y-auto">
+          {/* Upgrade wall — shown when billing not yet loaded as active */}
+          {billing !== null && !billing.active && (
+            <UpgradeWall onUpgrade={startCheckout} loading={checkoutLoading} />
+          )}
+
+          {billing?.active && (
+          <div className="flex-1 px-6 py-6">
           {error && (
             <div className="mb-4">
               <ErrorBanner message={error} onDismiss={() => setError(null)} />
@@ -557,6 +714,8 @@ export default function SearchPage() {
                 </button>
               )}
             </div>
+          )}
+          </div>
           )}
         </div>
       </main>

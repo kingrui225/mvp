@@ -111,7 +111,7 @@ export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Pr
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch('/api/account', { method: 'DELETE' })
+      const res = await fetch('/api/instagram/disconnect', { method: 'DELETE' })
       const data = await res.json()
       if (!res.ok || data.ok === false) {
         setError(data.error ?? 'Could not disconnect Instagram.')

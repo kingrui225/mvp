@@ -4,6 +4,7 @@ import { createClient } from '@/lib/supabase/server'
 import { createAdminClient } from '@/lib/supabase/admin'
 import { decrypt } from '@/lib/encrypt'
 import { runInstagramCommand } from '@/lib/instagram'
+import { hasActiveSubscription } from '@/lib/entitlement'
 
 export type SearchType = 'top' | 'reel' | 'hashtag' | 'place'
 
@@ -41,6 +42,12 @@ export async function POST(req: NextRequest) {
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  // ── Subscription guard ────────────────────────────────────────────────────
+  const hasSub = await hasActiveSubscription(user.id)
+  if (!hasSub) {
+    return NextResponse.json({ error: 'subscription_required' }, { status: 402 })
   }
 
   // ── Input validation ──────────────────────────────────────────────────────

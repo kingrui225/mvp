@@ -145,8 +145,13 @@ function runViaSubprocess(payload: IgCommand, timeoutMs: number): Promise<IgResp
 export function runInstagramCommand(payload: IgCommand, timeoutMs = 90_000): Promise<IgResponse> {
   // VERCEL=1 is set automatically by Vercel in all serverless environments.
   // INSTAGRAM_API_URL can also be set explicitly (e.g. for Railway worker).
-  const workerUrl = process.env.INSTAGRAM_API_URL
-    ?? (process.env.VERCEL === '1' ? `${process.env.NEXT_PUBLIC_APP_URL}/api/ig` : null)
+  // VERCEL_URL is set automatically by Vercel (no protocol, no trailing slash).
+  // INSTAGRAM_API_URL overrides everything (e.g. Railway worker).
+  const vercelInternalUrl = process.env.VERCEL_URL
+    ? `https://${process.env.VERCEL_URL}/api/ig`
+    : null
+
+  const workerUrl = process.env.INSTAGRAM_API_URL ?? vercelInternalUrl
 
   if (workerUrl) {
     return runViaHttp(payload, timeoutMs, workerUrl)

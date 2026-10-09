@@ -2,7 +2,10 @@
   "framework": "nextjs",
   "regions": ["iad1"],
   "functions": {
-    "api/ig.py":                          { "maxDuration": 60 },
+    "api/ig.py": {
+      "maxDuration": 60,
+      "includeFiles": "instagram_search.py"
+    },
     "app/api/instagram/connect/route.ts": { "maxDuration": 60 },
     "app/api/search/route.ts":            { "maxDuration": 60 }
   }
