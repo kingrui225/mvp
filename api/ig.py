@@ -45,7 +45,11 @@ class handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         # Auth check
-        if WORKER_SECRET and self.headers.get("X-Worker-Secret") != WORKER_SECRET:
+        incoming_secret = self.headers.get("X-Worker-Secret", "")
+        secret_ok = (not WORKER_SECRET) or (incoming_secret == WORKER_SECRET)
+        print(f"[ig.py] POST WORKER_SECRET_SET={bool(WORKER_SECRET)} SECRET_MATCH={secret_ok}", flush=True)
+        if not secret_ok:
+            print("[ig.py] 401 auth rejected", flush=True)
             self._send_json(401, {"ok": False, "error": "Unauthorized"})
             return
 
@@ -57,6 +61,7 @@ class handler(BaseHTTPRequestHandler):
             return
 
         cmd = payload.get("cmd", "")
+        print(f"[ig.py] dispatching cmd={cmd}", flush=True)
 
         try:
             if cmd == "login":

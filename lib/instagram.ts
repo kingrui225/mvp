@@ -54,9 +54,12 @@ async function runViaHttp(payload: IgCommand, timeoutMs: number, workerUrl: stri
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
 
+  // Railway worker uses /rpc; Vercel Python function is the endpoint itself
+  const endpoint = baseUrl.endsWith('/api/ig') ? baseUrl : `${baseUrl}/rpc`
+  const hasSecret = secret.length > 0
+  console.log('[instagram.ts] HTTP mode cmd=%s endpoint=%s hasSecret=%s', payload.cmd, endpoint, hasSecret)
+
   try {
-    // Railway worker uses /rpc; Vercel Python function is the endpoint itself
-    const endpoint = baseUrl.endsWith('/api/ig') ? baseUrl : `${baseUrl}/rpc`
     const res = await fetch(endpoint, {
       method: 'POST',
       headers: {
@@ -67,10 +70,20 @@ async function runViaHttp(payload: IgCommand, timeoutMs: number, workerUrl: stri
       signal: controller.signal,
     })
 
+    console.log('[instagram.ts] worker response status=%d', res.status)
+
+    if (!res.ok) {
+      const text = await res.text()
+      console.error('[instagram.ts] worker non-OK body=%s', text.slice(0, 300))
+      return { ok: false, error: `Worker returned ${res.status}: ${text.slice(0, 200)}` }
+    }
+
     const data = (await res.json()) as IgResponse
+    console.log('[instagram.ts] worker result ok=%s error=%s', data.ok, (data as IgFailure).error)
     return data
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err)
+    console.error('[instagram.ts] worker fetch error:', msg)
     if (msg.includes('abort') || msg.includes('AbortError')) {
       return { ok: false, error: 'Instagram request timed out.' }
     }

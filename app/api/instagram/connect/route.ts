@@ -92,7 +92,9 @@ export async function POST(req: NextRequest) {
   if (!limited.ok) return NextResponse.json({ error: limited.error }, { status: limited.status })
 
   try {
+    console.log('[ig/connect] calling runInstagramCommand login for', username)
     const result = await runInstagramCommand({ cmd: 'login', username, password })
+    console.log('[ig/connect] result ok=%s challenge=%s error=%s', result.ok, result.challenge_required, result.error)
 
     if (!result.ok) {
       await recordRateLimit({ userId: user.id, ipHash, action: 'ig_connect', success: false })
