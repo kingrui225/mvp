@@ -765,6 +765,24 @@ def _make_client() -> "Client":
     return cl
 
 
+# Device settings captured when Instagram asks for a code, so the follow-up
+# request can submit that code on the same device instead of starting over.
+_pending_login_settings: Dict[str, Dict[str, Any]] = {}
+
+
+def _decline_interactive_code(_username: str, choice) -> str:
+    """Refuse stdin prompts. An empty code makes instagrapi raise ChallengeRequired."""
+    print(f"[rpc_login] verification code required choice={choice}", flush=True)
+    return ""
+
+
+def _remember_pending_login(username: str, client) -> None:
+    try:
+        _pending_login_settings[username] = client.get_settings()
+    except Exception as e:
+        print(f"[rpc_login] could not save pending settings: {type(e).__name__}", flush=True)
+
+
 def rpc_login(username: str, password: str) -> dict:
     """
     Attempt direct instagrapi login (no Selenium).
@@ -788,6 +806,8 @@ def rpc_login(username: str, password: str) -> dict:
     )
 
     cl = _make_client()
+    # Never block on input(). The app collects the email/SMS code in a second request.
+    cl.challenge_code_handler = _decline_interactive_code
 
     try:
         cl.login(username, password)
@@ -799,12 +819,13 @@ def rpc_login(username: str, password: str) -> dict:
             "user_id": str(cl.user_id) if cl.user_id else None,
             "session": settings,
         }
-    except ChallengeRequired as e:
-        print(f"[rpc_login] ChallengeRequired: {e}", flush=True)
+    except (ChallengeRequired, EOFError) as e:
+        print(f"[rpc_login] verification required {type(e).__name__}: {e}", flush=True)
+        _remember_pending_login(username, cl)
         return {
             "ok": False,
             "challenge_required": True,
-            "error": "Instagram requires a verification code.",
+            "error": "Instagram sent a verification code. Enter it to finish connecting.",
         }
     except (BadPassword, BadCredentials, UserNotFound, LoginRequired) as e:
         print(f"[rpc_login] auth failed {type(e).__name__}: {e}", flush=True)
@@ -1002,19 +1023,18 @@ def rpc_browser_login(timeout_seconds: int = 300) -> dict:
 
 def rpc_challenge(username: str, password: str, code: str) -> dict:
     """
-    Re-attempt login and supply the challenge code via the challenge_code_handler
-    callback that instagrapi invokes internally when ChallengeRequired is raised.
+    Finish a login that asked for an email or SMS code.
+    Reuses the device settings from the first attempt when they are still in memory.
     """
-    from instagrapi import Client
-
-    cl = Client()
-    cl.delay_range = [1, 3]
-    # instagrapi calls this when ChallengeRequired is raised during login();
-    # the callback receives (username, choice) and must return the code string.
+    cl = _make_client()
+    saved = _pending_login_settings.pop(username, None)
+    if saved:
+        cl.set_settings(saved)
+        print(f"[rpc_challenge] reusing pending device settings for {username}", flush=True)
     cl.challenge_code_handler = lambda _u, _c: code
 
     try:
-        cl.login(username, password)
+        cl.login(username, password, verification_code=code)
         settings = cl.get_settings()
         return {
             "ok": True,
@@ -1022,7 +1042,8 @@ def rpc_challenge(username: str, password: str, code: str) -> dict:
             "user_id": str(cl.user_id) if cl.user_id else None,
             "session": settings,
         }
-    except Exception:
+    except Exception as e:
+        print(f"[rpc_challenge] failed {type(e).__name__}: {e}", flush=True)
         return {"ok": False, "error": "Verification failed. Check the code and try again."}
 
 
