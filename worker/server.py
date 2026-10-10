@@ -87,7 +87,7 @@ async def rpc(request: Request):
     except Exception as e:
         import traceback
         traceback.print_exc()
-        result = {"ok": False, "error": f"Worker error: {type(e).__name__}"}
+        result = {"ok": False, "error": f"Worker error: {type(e).__name__}: {e}"}
 
     print(f"[worker] result ok={result.get('ok')} error={result.get('error', '')[:100]}", flush=True)
     return JSONResponse(result)
