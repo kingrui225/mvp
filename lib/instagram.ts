@@ -111,14 +111,17 @@ function redactLog(value: string): string {
 // ─── HTTP mode (production / Vercel) ────────────────────────────────────────
 
 async function runViaHttp(payload: IgCommand, timeoutMs: number, workerUrl: string): Promise<IgResponse> {
-  const baseUrl = workerUrl.replace(/\/$/, '')
+  const baseUrl = workerUrl.replace(/\/+$/, '')
   const secret = process.env.WORKER_SECRET ?? ''
 
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
 
-  // Railway worker uses /rpc; Vercel Python function is the endpoint itself
-  const endpoint = baseUrl.endsWith('/api/ig') ? baseUrl : `${baseUrl}/rpc`
+  // Railway worker is POST /rpc. Vercel Python function is the endpoint itself (/api/ig).
+  // Accept either the host or the full path so INSTAGRAM_API_URL can be set either way.
+  const endpoint = baseUrl.endsWith('/api/ig') || baseUrl.endsWith('/rpc')
+    ? baseUrl
+    : `${baseUrl}/rpc`
   const hasSecret = secret.length > 0
   console.log('[instagram.ts] HTTP mode cmd=%s endpoint=%s hasSecret=%s', payload.cmd, endpoint, hasSecret)
 
