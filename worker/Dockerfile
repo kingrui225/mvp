@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install system dependencies (needed for instagrapi)
+# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libffi-dev \
@@ -12,11 +12,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY worker/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the instagram_search module (shared with Vercel function)
+# Copy shared instagram_search module (repo root)
 COPY instagram_search.py /app/instagram_search.py
 
-# Copy worker server
+# Copy worker server and test script
 COPY worker/server.py /app/server.py
+COPY worker/test_ig.py /app/test_ig.py
 
 EXPOSE 8000
 
