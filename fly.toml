@@ -1,0 +1,25 @@
+# fly.toml — Instagram worker server
+# Deploy with: fly deploy
+# Docs: https://fly.io/docs/reference/configuration/
+
+app = "agenticfruit-ig-worker"
+primary_region = "sjc"  # San Jose (close to Vercel sfo1)
+
+[build]
+  dockerfile = "worker/Dockerfile"
+  # Build context is the repo root so instagram_search.py is accessible
+  build-target = ""
+
+[env]
+  PORT = "8000"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = "stop"   # scale to zero when idle (free tier)
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  size = "shared-cpu-1x"        # free allowance on Fly.io
+  memory = "512mb"

@@ -740,6 +740,30 @@ def build_client_from_settings(settings: dict):
     return cl
 
 
+def _make_client() -> "Client":
+    """
+    Create an instagrapi Client, optionally routing through a residential proxy.
+
+    Set INSTAGRAM_LOGIN_PROXY to a proxy URL to bypass datacenter IP blocks:
+        http://user:pass@host:port       (HTTP proxy)
+        socks5://user:pass@host:port     (SOCKS5 proxy)
+
+    Residential proxy services: Brightdata, Oxylabs, SmartProxy, IPRoyal.
+    Without a proxy, credential login from cloud datacenter IPs (Vercel, AWS, etc.)
+    will be rate-limited or blocked by Instagram.
+    """
+    from instagrapi import Client
+    proxy = os.environ.get("INSTAGRAM_LOGIN_PROXY", "").strip()
+    cl = Client()
+    cl.delay_range = [1, 3]
+    if proxy:
+        print(f"[ig] using proxy host={proxy.split('@')[-1] if '@' in proxy else proxy}", flush=True)
+        cl.set_proxy(proxy)
+    else:
+        print("[ig] no INSTAGRAM_LOGIN_PROXY set — login may fail from datacenter IPs", flush=True)
+    return cl
+
+
 def rpc_login(username: str, password: str) -> dict:
     """
     Attempt direct instagrapi login (no Selenium).
@@ -762,8 +786,7 @@ def rpc_login(username: str, password: str) -> dict:
         UserNotFound,
     )
 
-    cl = Client()
-    cl.delay_range = [1, 3]
+    cl = _make_client()
 
     try:
         cl.login(username, password)
@@ -820,8 +843,7 @@ def rpc_login_by_sessionid(sessionid: str) -> dict:
     if not sessionid or len(sessionid) < 10:
         return {"ok": False, "error": "Invalid session ID."}
 
-    cl = Client()
-    cl.delay_range = [1, 3]
+    cl = _make_client()
     try:
         cl.login_by_sessionid(sessionid)
         settings = cl.get_settings()
