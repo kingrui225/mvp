@@ -126,23 +126,29 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: GENERIC_AUTH_ERROR }, { status: 400 })
   }
 
-  const limited = await checkRateLimit({ userId: user.id, ipHash, action: 'ig_connect' })
-  if (!limited.ok) return NextResponse.json({ error: limited.error }, { status: limited.status })
+  const isCheck = body.method === 'check'
+  if (!isCheck) {
+    const limited = await checkRateLimit({ userId: user.id, ipHash, action: 'ig_connect' })
+    if (!limited.ok) return NextResponse.json({ error: limited.error }, { status: limited.status })
+  }
 
   try {
-    console.log('[ig/connect] calling runInstagramCommand login for', username)
-    const result = await runInstagramCommand({ cmd: 'login', username, password })
+    console.log('[ig/connect] calling runInstagramCommand login for', username, isCheck ? '(poll)' : '')
+    const result = await runInstagramCommand({ cmd: 'login', username, password, poll: isCheck })
 
     if (!result.ok) {
       const failure = result as IgFailure
       // Log full internal detail server-side only
       console.error('[ig/connect] login failed code=%s internal=%s', failure.code, failure._internalError ?? failure.error)
-      await recordRateLimit({ userId: user.id, ipHash, action: 'ig_connect', success: false })
+      if (!isCheck) {
+        await recordRateLimit({ userId: user.id, ipHash, action: 'ig_connect', success: false })
+      }
       if (failure.challenge_required) {
         return NextResponse.json({
           ok: false,
           challenge_required: true,
-          verification_method: failure.verification_method ?? 'email',
+          verification_method: failure.verification_method ?? 'unknown',
+          verification_methods: failure.verification_methods ?? ['unknown'],
           error: failure.error,
         })
       }

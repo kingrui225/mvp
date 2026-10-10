@@ -768,38 +768,108 @@ def _make_client() -> "Client":
 # Device settings captured when Instagram asks for a code, so the follow-up
 # request can submit that code on the same device instead of starting over.
 _pending_login_settings: Dict[str, Dict[str, Any]] = {}
-_pending_verification_method: Dict[str, str] = {}
+_pending_verification_methods: Dict[str, List[str]] = {}
+_last_challenge: Dict[str, dict] = {}
+_last_attempt_at: Dict[str, float] = {}
+
+_KNOWN_METHODS = ("app", "email", "sms", "totp", "unknown")
 
 
-def _method_from_choice(choice) -> str:
-    name = getattr(choice, "name", str(choice)).upper()
-    if "SMS" in name:
-        return "sms"
-    return "email"
+def _collect_keys(value: Any, depth: int = 0) -> List[str]:
+    keys: List[str] = []
+    if depth > 3:
+        return keys
+    if isinstance(value, dict):
+        for key, child in value.items():
+            keys.append(str(key))
+            keys.extend(_collect_keys(child, depth + 1))
+    elif isinstance(value, list):
+        for child in value[:20]:
+            keys.extend(_collect_keys(child, depth + 1))
+    return keys
 
 
-def _challenge_payload(username: str, method: Optional[str] = None) -> dict:
-    method = method or _pending_verification_method.get(username, "email")
-    messages = {
-        "email": "Instagram emailed you a verification code.",
-        "sms": "Instagram texted you a verification code.",
-        "totp": "Enter the 6-digit code from your authenticator app. A backup code also works.",
-        "app": "Approve this login in the Instagram app, then try connecting again.",
+def _find_flag(value: Any, key: str) -> bool:
+    if isinstance(value, dict):
+        if key in value:
+            flag = value[key]
+            if isinstance(flag, bool):
+                return flag
+            if isinstance(flag, (int, float)):
+                return bool(flag)
+            if isinstance(flag, str):
+                return flag.strip().lower() in {"1", "true", "yes"}
+        return any(_find_flag(child, key) for child in value.values())
+    if isinstance(value, list):
+        return any(_find_flag(child, key) for child in value[:20])
+    return False
+
+
+def _find_text(value: Any, key: str) -> str:
+    if isinstance(value, dict):
+        if key in value and isinstance(value[key], str):
+            return value[key]
+        for child in value.values():
+            found = _find_text(child, key)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for child in value[:20]:
+            found = _find_text(child, key)
+            if found:
+                return found
+    return ""
+
+
+def _methods_from_payload(payload: Any) -> List[str]:
+    """Read the verification methods Instagram actually named. Never guess email."""
+    text = json.dumps(payload, default=str).lower() if payload else ""
+    step = _find_text(payload, "step_name").lower()
+    methods: List[str] = []
+    if _find_flag(payload, "totp_two_factor_on") or "enter_totp_code" in text or "totp" in step:
+        methods.append("totp")
+    if _find_flag(payload, "sms_two_factor_on") or "sms" in step or "whatsapp" in text:
+        methods.append("sms")
+    if any(marker in text for marker in (
+        "delta_login_review",
+        "challenge.redirect",
+        "login_notification",
+        "trusted_notification",
+        "delta_acknowledge_approved",
+    )):
+        methods.append("app")
+    if "verify_email" in text or "email" in step or _find_flag(payload, "email_two_factor_on"):
+        methods.append("email")
+    return methods
+
+
+def _remember_methods(username: str, methods: List[str]) -> List[str]:
+    cleaned = [method for method in methods if method in _KNOWN_METHODS]
+    if not cleaned:
+        cleaned = ["unknown"]
+    _pending_verification_methods[username] = cleaned
+    return cleaned
+
+
+def _challenge_payload(username: str, methods: Optional[List[str]] = None) -> dict:
+    methods = _remember_methods(username, methods or _pending_verification_methods.get(username, []))
+    labels = {
+        "app": "an approval in the Instagram app",
+        "email": "an email code",
+        "sms": "a text-message code",
+        "totp": "an authenticator code",
+        "unknown": "a confirmation Instagram did not name",
     }
-    return {
+    named = ", ".join(labels[method] for method in methods)
+    payload = {
         "ok": False,
         "challenge_required": True,
-        "verification_method": method,
-        "error": messages.get(method, messages["email"]),
+        "verification_method": methods[0],
+        "verification_methods": methods,
+        "error": f"Instagram is asking for {named}.",
     }
-
-
-def _decline_interactive_code(username: str, choice) -> str:
-    """Refuse stdin prompts. An empty code makes instagrapi raise ChallengeRequired."""
-    method = _method_from_choice(choice)
-    _pending_verification_method[username] = method
-    print(f"[rpc_login] verification code required method={method}", flush=True)
-    return ""
+    _last_challenge[username] = payload
+    return payload
 
 
 def _remember_pending_login(username: str, client) -> None:
@@ -809,7 +879,7 @@ def _remember_pending_login(username: str, client) -> None:
         print(f"[rpc_login] could not save pending settings: {type(e).__name__}", flush=True)
 
 
-def rpc_login(username: str, password: str) -> dict:
+def rpc_login(username: str, password: str, poll: bool = False) -> dict:
     """
     Attempt direct instagrapi login (no Selenium).
     Returns the session settings dict on success so the caller can persist it.
@@ -831,20 +901,36 @@ def rpc_login(username: str, password: str) -> dict:
         UserNotFound,
     )
 
+    now = time.time()
+    if poll and now - _last_attempt_at.get(username, 0) < 5 and username in _last_challenge:
+        return _last_challenge[username]
+
     cl = _make_client()
     saved = _pending_login_settings.get(username)
     if saved:
         cl.set_settings(saved)
         print(f"[rpc_login] reusing pending device settings for {username}", flush=True)
-    # Never block on input(). The app collects the email/SMS/authenticator code.
+
+    def _decline_interactive_code(_username: str, choice) -> str:
+        methods = _methods_from_payload(getattr(cl, "last_json", {}))
+        if getattr(choice, "name", "") == "SMS":
+            methods.append("sms")
+        methods = _remember_methods(username, methods)
+        keys = sorted(set(_collect_keys(getattr(cl, "last_json", {}))))[:40]
+        print(f"[rpc_login] instagram methods={methods} choice={getattr(choice, 'name', choice)} keys={keys}", flush=True)
+        return ""
+
+    # Never block on input(). The app collects a code and also polls for an in-app approval.
     cl.challenge_code_handler = _decline_interactive_code
+    _last_attempt_at[username] = now
 
     try:
         cl.login(username, password)
         settings = cl.get_settings()
         print(f"[rpc_login] success username={username}", flush=True)
         _pending_login_settings.pop(username, None)
-        _pending_verification_method.pop(username, None)
+        _pending_verification_methods.pop(username, None)
+        _last_challenge.pop(username, None)
         return {
             "ok": True,
             "username": cl.username,
@@ -852,16 +938,16 @@ def rpc_login(username: str, password: str) -> dict:
             "session": settings,
         }
     except (ChallengeRequired, EOFError) as e:
-        message = str(e).lower()
-        method = "app" if "instagram app" in message or "checkpoint" in message else None
-        print(f"[rpc_login] verification required {type(e).__name__} method={method or _pending_verification_method.get(username, 'email')}", flush=True)
+        methods = _methods_from_payload(getattr(cl, "last_json", {}))
+        if "instagram app" in str(e).lower() or "checkpoint" in str(e).lower():
+            methods.append("app")
+        print(f"[rpc_login] verification required {type(e).__name__} methods={methods or _pending_verification_methods.get(username)}", flush=True)
         _remember_pending_login(username, cl)
-        return _challenge_payload(username, method)
+        return _challenge_payload(username, methods)
     except TwoFactorRequired as e:
         print(f"[rpc_login] authenticator code required: {e}", flush=True)
-        _pending_verification_method[username] = "totp"
         _remember_pending_login(username, cl)
-        return _challenge_payload(username, "totp")
+        return _challenge_payload(username, ["totp"])
     except (BadPassword, BadCredentials, UserNotFound, LoginRequired) as e:
         print(f"[rpc_login] auth failed {type(e).__name__}: {e}", flush=True)
         return {"ok": False, "error": "Authentication failed. Check your username and password."}
@@ -1069,7 +1155,8 @@ def rpc_challenge(username: str, password: str, code: str) -> dict:
         cl.login(username, password, verification_code=code)
         settings = cl.get_settings()
         _pending_login_settings.pop(username, None)
-        _pending_verification_method.pop(username, None)
+        _pending_verification_methods.pop(username, None)
+        _last_challenge.pop(username, None)
         return {
             "ok": True,
             "username": cl.username,

@@ -68,6 +68,7 @@ class handler(BaseHTTPRequestHandler):
                 result = ig.rpc_login(
                     str(payload.get("username", "")),
                     str(payload.get("password", "")),
+                    poll=bool(payload.get("poll")),
                 )
             elif cmd == "login_by_sessionid":
                 result = ig.rpc_login_by_sessionid(str(payload.get("sessionid", "")))

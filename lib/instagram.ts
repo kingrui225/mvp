@@ -13,7 +13,7 @@ const REPO_ROOT = path.resolve(/*turbopackIgnore: true*/ process.cwd())
 const SCRIPT_PATH = path.join(REPO_ROOT, 'instagram_search.py')
 
 export type IgCommand =
-  | { cmd: 'login'; username: string; password: string }
+  | { cmd: 'login'; username: string; password: string; poll?: boolean }
   | { cmd: 'browser_login'; timeout_seconds?: number }
   | { cmd: 'login_by_sessionid'; sessionid: string }
   | { cmd: 'challenge'; username: string; password: string; code: string }
@@ -39,7 +39,7 @@ export type IgErrorCode =
   | 'WORKER_ERROR'      // infrastructure / internal error
   | 'UNKNOWN'           // unclassified
 
-export type IgVerificationMethod = 'email' | 'sms' | 'totp' | 'app'
+export type IgVerificationMethod = 'email' | 'sms' | 'totp' | 'app' | 'unknown'
 
 export interface IgFailure {
   ok: false
@@ -52,6 +52,8 @@ export interface IgFailure {
   challenge_required?: boolean
   /** Where Instagram asked the user to confirm: email, SMS, authenticator, or the Instagram app */
   verification_method?: IgVerificationMethod
+  /** Every method named in Instagram's response. Empty detection becomes ["unknown"]. */
+  verification_methods?: IgVerificationMethod[]
 }
 
 /** Canonical user-facing messages keyed by error code */
@@ -69,11 +71,16 @@ const USER_MESSAGES: Record<IgErrorCode, string> = {
  * Only well-known patterns get a specific code; everything else → UNKNOWN / WORKER_ERROR.
  * The _internalError field preserves the raw string for server-side logging only.
  */
-const VERIFICATION_METHODS = new Set<IgVerificationMethod>(['email', 'sms', 'totp', 'app'])
+const VERIFICATION_METHODS = new Set<IgVerificationMethod>(['email', 'sms', 'totp', 'app', 'unknown'])
 
 export function classifyIgError(
   rawError: string,
-  opts: { challenge_required?: boolean; isInfra?: boolean; verification_method?: string } = {},
+  opts: {
+    challenge_required?: boolean
+    isInfra?: boolean
+    verification_method?: string
+    verification_methods?: string[]
+  } = {},
 ): IgFailure {
   if (opts.isInfra) {
     return { ok: false, code: 'WORKER_ERROR', error: USER_MESSAGES.WORKER_ERROR, _internalError: rawError }
@@ -96,9 +103,11 @@ export function classifyIgError(
     code = 'WORKER_ERROR'
   }
 
+  const verificationMethods = (opts.verification_methods ?? [])
+    .filter((method): method is IgVerificationMethod => VERIFICATION_METHODS.has(method as IgVerificationMethod))
   const verificationMethod = VERIFICATION_METHODS.has(opts.verification_method as IgVerificationMethod)
     ? (opts.verification_method as IgVerificationMethod)
-    : undefined
+    : verificationMethods[0]
 
   return {
     ok: false,
@@ -107,6 +116,7 @@ export function classifyIgError(
     _internalError: rawError,
     ...(opts.challenge_required || code === 'CHALLENGE' ? { challenge_required: true } : {}),
     ...(verificationMethod ? { verification_method: verificationMethod } : {}),
+    ...(verificationMethods.length ? { verification_methods: verificationMethods } : {}),
   }
 }
 
@@ -164,6 +174,7 @@ async function runViaHttp(payload: IgCommand, timeoutMs: number, workerUrl: stri
       return classifyIgError(raw, {
         challenge_required: (data as IgFailure).challenge_required,
         verification_method: (data as IgFailure).verification_method,
+        verification_methods: (data as IgFailure).verification_methods,
       })
     }
     console.log('[instagram.ts] worker result ok=true')
@@ -227,6 +238,7 @@ function runViaSubprocess(payload: IgCommand, timeoutMs: number): Promise<IgResp
             finish(classifyIgError(raw, {
               challenge_required: (parsed as IgFailure).challenge_required,
               verification_method: (parsed as IgFailure).verification_method,
+              verification_methods: (parsed as IgFailure).verification_methods,
             }))
             return
           }

@@ -1,7 +1,7 @@
 'use client'
 
 import { AtSign, Globe, Hash, KeyRound, X } from 'lucide-react'
-import { FormEvent, useEffect, useState } from 'react'
+import { FormEvent, useEffect, useRef, useState } from 'react'
 
 export interface InstagramStatus {
   connected: boolean
@@ -21,13 +21,27 @@ interface Props {
 const BROWSER_LOGIN_AVAILABLE = process.env.NEXT_PUBLIC_BROWSER_LOGIN === 'true'
 
 type ConnectMethod = 'browser' | 'credentials' | 'sessionid'
-type VerificationMethod = 'email' | 'sms' | 'totp' | 'app'
+type VerificationMethod = 'email' | 'sms' | 'totp' | 'app' | 'unknown'
 
-const VERIFICATION_HINT: Record<VerificationMethod, string> = {
-  email: 'Instagram emailed you a code. Enter it below.',
-  sms: 'Instagram texted you a code. Enter it below.',
-  totp: 'Enter the 6-digit code from your authenticator app. A backup code also works.',
-  app: 'Open the Instagram app and approve this login, then press the button below.',
+const METHOD_LABEL: Record<VerificationMethod, string> = {
+  email: 'an email code',
+  sms: 'a text-message code',
+  totp: 'an authenticator code',
+  app: 'an approval in the Instagram app',
+  unknown: 'a confirmation Instagram did not name',
+}
+
+function verificationHint(methods: VerificationMethod[]): string {
+  const named = methods.map((method) => METHOD_LABEL[method]).join(' and ')
+  return `Instagram is asking for ${named}. This screen keeps checking for an in-app approval, and you can enter a code if you received one.`
+}
+
+function asMethods(value: unknown): VerificationMethod[] {
+  if (!Array.isArray(value)) return ['unknown']
+  const methods = value.filter((method): method is VerificationMethod =>
+    method === 'email' || method === 'sms' || method === 'totp' || method === 'app' || method === 'unknown'
+  )
+  return methods.length ? methods : ['unknown']
 }
 
 export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Props) {
@@ -37,9 +51,12 @@ export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Pr
   const [code, setCode] = useState('')
   const [sessionid, setSessionid] = useState('')
   const [challengeRequired, setChallengeRequired] = useState(false)
-  const [verificationMethod, setVerificationMethod] = useState<VerificationMethod>('email')
+  const [verificationMethods, setVerificationMethods] = useState<VerificationMethod[]>(['unknown'])
+  const [checking, setChecking] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const onChangedRef = useRef(onChanged)
+  onChangedRef.current = onChanged
 
   useEffect(() => {
     if (!open) {
@@ -48,11 +65,56 @@ export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Pr
       setCode('')
       setSessionid('')
       setChallengeRequired(false)
-      setVerificationMethod('email')
+      setVerificationMethods(['unknown'])
+      setChecking(false)
       setError(null)
       setMethod('credentials')
     }
   }, [open])
+
+  useEffect(() => {
+    if (!open || !challengeRequired || method !== 'credentials' || !username || !password) return
+    let stopped = false
+    const started = Date.now()
+
+    const check = async () => {
+      if (stopped || Date.now() - started > 120_000) return
+      setChecking(true)
+      try {
+        const res = await fetch('/api/instagram/connect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ method: 'check', username, password }),
+        })
+        const data = await res.json()
+        if (stopped) return
+        if (data.ok) {
+          stopped = true
+          setPassword('')
+          setCode('')
+          setChallengeRequired(false)
+          const status = await fetch('/api/instagram/status').then((r) => r.json())
+          onChangedRef.current(status)
+          return
+        }
+        if (data.challenge_required) {
+          setVerificationMethods(asMethods(data.verification_methods))
+        }
+      } catch {
+        // Keep checking. A single network miss should not stop the approval watch.
+      } finally {
+        if (!stopped) setChecking(false)
+      }
+    }
+
+    const first = setTimeout(check, 2000)
+    const timer = setInterval(check, 6000)
+    return () => {
+      stopped = true
+      clearTimeout(first)
+      clearInterval(timer)
+    }
+  }, [open, challengeRequired, method, username, password])
 
   if (!open) return null
 
@@ -89,24 +151,20 @@ export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Pr
     setLoading(true)
     setError(null)
     try {
-      const waitingOnApp = challengeRequired && verificationMethod === 'app'
-      const endpoint = challengeRequired && !waitingOnApp ? '/api/instagram/challenge' : '/api/instagram/connect'
+      const submittingCode = challengeRequired && code.trim().length > 0
+      const endpoint = submittingCode ? '/api/instagram/challenge' : '/api/instagram/connect'
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(
-          challengeRequired && !waitingOnApp
+          submittingCode
             ? { username, password, code }
-            : { username, password }
+            : { method: challengeRequired ? 'check' : undefined, username, password }
         ),
       })
       const data = await res.json()
       if (data.challenge_required) {
-        const nextMethod: VerificationMethod =
-          data.verification_method === 'sms' || data.verification_method === 'totp' || data.verification_method === 'app'
-            ? data.verification_method
-            : 'email'
-        setVerificationMethod(nextMethod)
+        setVerificationMethods(asMethods(data.verification_methods ?? [data.verification_method]))
         setChallengeRequired(true)
         setError(null)
         return
@@ -246,17 +304,17 @@ export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Pr
                   />
                   {challengeRequired && (
                     <p className="rounded-xl border border-[#e1e5ea] bg-[#f8f9fb] px-3.5 py-2.5 text-xs leading-relaxed text-[#657180]">
-                      {VERIFICATION_HINT[verificationMethod]}
+                      {verificationHint(verificationMethods)}
+                      {checking && <span className="mt-1 block text-[#8994a1]">Checking Instagram…</span>}
                     </p>
                   )}
-                  {challengeRequired && verificationMethod !== 'app' && (
+                  {challengeRequired && (
                     <input
                       value={code}
                       onChange={(e) => setCode(e.target.value)}
-                      placeholder={verificationMethod === 'totp' ? 'Authenticator or backup code' : 'Verification code'}
+                      placeholder="Code, if Instagram sent one"
                       autoComplete="one-time-code"
                       inputMode="numeric"
-                      required
                       className="rounded-xl border border-[#d9dfe6] bg-[#f8f9fb] px-3.5 py-2.5 text-sm outline-none focus:border-[#17202b] focus:bg-white"
                     />
                   )}
@@ -270,7 +328,7 @@ export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Pr
                     ) : (
                       <KeyRound className="size-4" />
                     )}
-                    {loading ? 'Connecting…' : challengeRequired ? (verificationMethod === 'app' ? 'I approved it' : 'Verify code') : 'Connect Instagram'}
+                    {loading ? 'Connecting…' : challengeRequired ? (code.trim() ? 'Verify code' : 'Check again') : 'Connect Instagram'}
                   </button>
                 </form>
               )}
@@ -361,7 +419,7 @@ export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Pr
                 )}
                 {method !== 'credentials' && (
                   <button
-                    onClick={() => { setMethod('credentials'); setError(null); setChallengeRequired(false); setVerificationMethod('email') }}
+                    onClick={() => { setMethod('credentials'); setError(null); setChallengeRequired(false); setVerificationMethods(['unknown']) }}
                     className="flex items-center gap-1 text-xs text-[#8994a1] hover:text-[#657180] transition"
                   >
                     <KeyRound className="size-3" />
