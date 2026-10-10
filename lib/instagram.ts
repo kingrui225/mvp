@@ -39,6 +39,8 @@ export type IgErrorCode =
   | 'WORKER_ERROR'      // infrastructure / internal error
   | 'UNKNOWN'           // unclassified
 
+export type IgVerificationMethod = 'email' | 'sms' | 'totp' | 'app'
+
 export interface IgFailure {
   ok: false
   /** Machine-readable code — safe to log and pass to the client */
@@ -48,6 +50,8 @@ export interface IgFailure {
   /** User-safe message derived from the code */
   error: string
   challenge_required?: boolean
+  /** Where Instagram asked the user to confirm: email, SMS, authenticator, or the Instagram app */
+  verification_method?: IgVerificationMethod
 }
 
 /** Canonical user-facing messages keyed by error code */
@@ -65,9 +69,11 @@ const USER_MESSAGES: Record<IgErrorCode, string> = {
  * Only well-known patterns get a specific code; everything else → UNKNOWN / WORKER_ERROR.
  * The _internalError field preserves the raw string for server-side logging only.
  */
+const VERIFICATION_METHODS = new Set<IgVerificationMethod>(['email', 'sms', 'totp', 'app'])
+
 export function classifyIgError(
   rawError: string,
-  opts: { challenge_required?: boolean; isInfra?: boolean } = {},
+  opts: { challenge_required?: boolean; isInfra?: boolean; verification_method?: string } = {},
 ): IgFailure {
   if (opts.isInfra) {
     return { ok: false, code: 'WORKER_ERROR', error: USER_MESSAGES.WORKER_ERROR, _internalError: rawError }
@@ -90,12 +96,17 @@ export function classifyIgError(
     code = 'WORKER_ERROR'
   }
 
+  const verificationMethod = VERIFICATION_METHODS.has(opts.verification_method as IgVerificationMethod)
+    ? (opts.verification_method as IgVerificationMethod)
+    : undefined
+
   return {
     ok: false,
     code,
     error: USER_MESSAGES[code],
     _internalError: rawError,
-    ...(opts.challenge_required ? { challenge_required: true } : {}),
+    ...(opts.challenge_required || code === 'CHALLENGE' ? { challenge_required: true } : {}),
+    ...(verificationMethod ? { verification_method: verificationMethod } : {}),
   }
 }
 
@@ -150,7 +161,10 @@ async function runViaHttp(payload: IgCommand, timeoutMs: number, workerUrl: stri
       const raw = (data as IgFailure)._internalError ?? (data as IgFailure).error ?? 'unknown'
       console.error('[instagram.ts] worker returned ok=false raw=%s', raw)
       // Re-classify with our canonical codes so _internalError is always set
-      return classifyIgError(raw, { challenge_required: (data as IgFailure).challenge_required })
+      return classifyIgError(raw, {
+        challenge_required: (data as IgFailure).challenge_required,
+        verification_method: (data as IgFailure).verification_method,
+      })
     }
     console.log('[instagram.ts] worker result ok=true')
     return data
@@ -210,7 +224,10 @@ function runViaSubprocess(payload: IgCommand, timeoutMs: number): Promise<IgResp
           if (!parsed.ok) {
             const raw = (parsed as IgFailure).error ?? 'unknown'
             console.error('[instagram.ts] subprocess ok=false raw=%s', raw)
-            finish(classifyIgError(raw, { challenge_required: (parsed as IgFailure).challenge_required }))
+            finish(classifyIgError(raw, {
+              challenge_required: (parsed as IgFailure).challenge_required,
+              verification_method: (parsed as IgFailure).verification_method,
+            }))
             return
           }
           finish(parsed)

@@ -768,11 +768,37 @@ def _make_client() -> "Client":
 # Device settings captured when Instagram asks for a code, so the follow-up
 # request can submit that code on the same device instead of starting over.
 _pending_login_settings: Dict[str, Dict[str, Any]] = {}
+_pending_verification_method: Dict[str, str] = {}
 
 
-def _decline_interactive_code(_username: str, choice) -> str:
+def _method_from_choice(choice) -> str:
+    name = getattr(choice, "name", str(choice)).upper()
+    if "SMS" in name:
+        return "sms"
+    return "email"
+
+
+def _challenge_payload(username: str, method: Optional[str] = None) -> dict:
+    method = method or _pending_verification_method.get(username, "email")
+    messages = {
+        "email": "Instagram emailed you a verification code.",
+        "sms": "Instagram texted you a verification code.",
+        "totp": "Enter the 6-digit code from your authenticator app. A backup code also works.",
+        "app": "Approve this login in the Instagram app, then try connecting again.",
+    }
+    return {
+        "ok": False,
+        "challenge_required": True,
+        "verification_method": method,
+        "error": messages.get(method, messages["email"]),
+    }
+
+
+def _decline_interactive_code(username: str, choice) -> str:
     """Refuse stdin prompts. An empty code makes instagrapi raise ChallengeRequired."""
-    print(f"[rpc_login] verification code required choice={choice}", flush=True)
+    method = _method_from_choice(choice)
+    _pending_verification_method[username] = method
+    print(f"[rpc_login] verification code required method={method}", flush=True)
     return ""
 
 
@@ -806,13 +832,19 @@ def rpc_login(username: str, password: str) -> dict:
     )
 
     cl = _make_client()
-    # Never block on input(). The app collects the email/SMS code in a second request.
+    saved = _pending_login_settings.get(username)
+    if saved:
+        cl.set_settings(saved)
+        print(f"[rpc_login] reusing pending device settings for {username}", flush=True)
+    # Never block on input(). The app collects the email/SMS/authenticator code.
     cl.challenge_code_handler = _decline_interactive_code
 
     try:
         cl.login(username, password)
         settings = cl.get_settings()
         print(f"[rpc_login] success username={username}", flush=True)
+        _pending_login_settings.pop(username, None)
+        _pending_verification_method.pop(username, None)
         return {
             "ok": True,
             "username": cl.username,
@@ -820,19 +852,19 @@ def rpc_login(username: str, password: str) -> dict:
             "session": settings,
         }
     except (ChallengeRequired, EOFError) as e:
-        print(f"[rpc_login] verification required {type(e).__name__}: {e}", flush=True)
+        message = str(e).lower()
+        method = "app" if "instagram app" in message or "checkpoint" in message else None
+        print(f"[rpc_login] verification required {type(e).__name__} method={method or _pending_verification_method.get(username, 'email')}", flush=True)
         _remember_pending_login(username, cl)
-        return {
-            "ok": False,
-            "challenge_required": True,
-            "error": "Instagram sent a verification code. Enter it to finish connecting.",
-        }
+        return _challenge_payload(username, method)
+    except TwoFactorRequired as e:
+        print(f"[rpc_login] authenticator code required: {e}", flush=True)
+        _pending_verification_method[username] = "totp"
+        _remember_pending_login(username, cl)
+        return _challenge_payload(username, "totp")
     except (BadPassword, BadCredentials, UserNotFound, LoginRequired) as e:
         print(f"[rpc_login] auth failed {type(e).__name__}: {e}", flush=True)
         return {"ok": False, "error": "Authentication failed. Check your username and password."}
-    except TwoFactorRequired as e:
-        print(f"[rpc_login] TwoFactorRequired: {e}", flush=True)
-        return {"ok": False, "error": "Two-factor authentication is required. Disable it or use an app password."}
     except FeedbackRequired as e:
         print(f"[rpc_login] FeedbackRequired: {e}", flush=True)
         return {"ok": False, "error": "Instagram blocked this login attempt. Try again later or use the browser login."}
@@ -1027,7 +1059,7 @@ def rpc_challenge(username: str, password: str, code: str) -> dict:
     Reuses the device settings from the first attempt when they are still in memory.
     """
     cl = _make_client()
-    saved = _pending_login_settings.pop(username, None)
+    saved = _pending_login_settings.get(username)
     if saved:
         cl.set_settings(saved)
         print(f"[rpc_challenge] reusing pending device settings for {username}", flush=True)
@@ -1036,6 +1068,8 @@ def rpc_challenge(username: str, password: str, code: str) -> dict:
     try:
         cl.login(username, password, verification_code=code)
         settings = cl.get_settings()
+        _pending_login_settings.pop(username, None)
+        _pending_verification_method.pop(username, None)
         return {
             "ok": True,
             "username": cl.username,

@@ -139,7 +139,12 @@ export async function POST(req: NextRequest) {
       console.error('[ig/connect] login failed code=%s internal=%s', failure.code, failure._internalError ?? failure.error)
       await recordRateLimit({ userId: user.id, ipHash, action: 'ig_connect', success: false })
       if (failure.challenge_required) {
-        return NextResponse.json({ ok: false, challenge_required: true, error: failure.error })
+        return NextResponse.json({
+          ok: false,
+          challenge_required: true,
+          verification_method: failure.verification_method ?? 'email',
+          error: failure.error,
+        })
       }
       // result.error is already a safe, classified user message from classifyIgError
       return NextResponse.json({ ok: false, error: failure.error }, { status: 401 })

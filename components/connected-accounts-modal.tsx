@@ -21,6 +21,14 @@ interface Props {
 const BROWSER_LOGIN_AVAILABLE = process.env.NEXT_PUBLIC_BROWSER_LOGIN === 'true'
 
 type ConnectMethod = 'browser' | 'credentials' | 'sessionid'
+type VerificationMethod = 'email' | 'sms' | 'totp' | 'app'
+
+const VERIFICATION_HINT: Record<VerificationMethod, string> = {
+  email: 'Instagram emailed you a code. Enter it below.',
+  sms: 'Instagram texted you a code. Enter it below.',
+  totp: 'Enter the 6-digit code from your authenticator app. A backup code also works.',
+  app: 'Open the Instagram app and approve this login, then press the button below.',
+}
 
 export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Props) {
   const [method, setMethod] = useState<ConnectMethod>('credentials')
@@ -29,6 +37,7 @@ export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Pr
   const [code, setCode] = useState('')
   const [sessionid, setSessionid] = useState('')
   const [challengeRequired, setChallengeRequired] = useState(false)
+  const [verificationMethod, setVerificationMethod] = useState<VerificationMethod>('email')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -39,6 +48,7 @@ export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Pr
       setCode('')
       setSessionid('')
       setChallengeRequired(false)
+      setVerificationMethod('email')
       setError(null)
       setMethod('credentials')
     }
@@ -79,20 +89,26 @@ export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Pr
     setLoading(true)
     setError(null)
     try {
-      const endpoint = challengeRequired ? '/api/instagram/challenge' : '/api/instagram/connect'
+      const waitingOnApp = challengeRequired && verificationMethod === 'app'
+      const endpoint = challengeRequired && !waitingOnApp ? '/api/instagram/challenge' : '/api/instagram/connect'
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(
-          challengeRequired
+          challengeRequired && !waitingOnApp
             ? { username, password, code }
             : { username, password }
         ),
       })
       const data = await res.json()
       if (data.challenge_required) {
+        const nextMethod: VerificationMethod =
+          data.verification_method === 'sms' || data.verification_method === 'totp' || data.verification_method === 'app'
+            ? data.verification_method
+            : 'email'
+        setVerificationMethod(nextMethod)
         setChallengeRequired(true)
-        setError(data.error ?? 'Enter the verification code Instagram sent you.')
+        setError(null)
         return
       }
       if (!res.ok || data.ok === false) {
@@ -229,13 +245,17 @@ export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Pr
                     className="rounded-xl border border-[#d9dfe6] bg-[#f8f9fb] px-3.5 py-2.5 text-sm outline-none focus:border-[#17202b] focus:bg-white"
                   />
                   {challengeRequired && (
+                    <p className="rounded-xl border border-[#e1e5ea] bg-[#f8f9fb] px-3.5 py-2.5 text-xs leading-relaxed text-[#657180]">
+                      {VERIFICATION_HINT[verificationMethod]}
+                    </p>
+                  )}
+                  {challengeRequired && verificationMethod !== 'app' && (
                     <input
                       value={code}
                       onChange={(e) => setCode(e.target.value)}
-                      placeholder="Verification code"
-                      autoComplete="off"
-                      readOnly
-                      onFocus={(e) => e.currentTarget.removeAttribute('readonly')}
+                      placeholder={verificationMethod === 'totp' ? 'Authenticator or backup code' : 'Verification code'}
+                      autoComplete="one-time-code"
+                      inputMode="numeric"
                       required
                       className="rounded-xl border border-[#d9dfe6] bg-[#f8f9fb] px-3.5 py-2.5 text-sm outline-none focus:border-[#17202b] focus:bg-white"
                     />
@@ -250,7 +270,7 @@ export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Pr
                     ) : (
                       <KeyRound className="size-4" />
                     )}
-                    {loading ? 'Connecting…' : challengeRequired ? 'Verify code' : 'Connect Instagram'}
+                    {loading ? 'Connecting…' : challengeRequired ? (verificationMethod === 'app' ? 'I approved it' : 'Verify code') : 'Connect Instagram'}
                   </button>
                 </form>
               )}
@@ -341,7 +361,7 @@ export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Pr
                 )}
                 {method !== 'credentials' && (
                   <button
-                    onClick={() => { setMethod('credentials'); setError(null); setChallengeRequired(false) }}
+                    onClick={() => { setMethod('credentials'); setError(null); setChallengeRequired(false); setVerificationMethod('email') }}
                     className="flex items-center gap-1 text-xs text-[#8994a1] hover:text-[#657180] transition"
                   >
                     <KeyRound className="size-3" />
