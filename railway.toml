@@ -1,0 +1,8 @@
+[build]
+  dockerfilePath = "worker/Dockerfile"
+  buildContext = "."
+
+[deploy]
+  startCommand = "python server.py"
+  healthcheckPath = "/"
+  healthcheckTimeout = 30
