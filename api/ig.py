@@ -69,6 +69,7 @@ class handler(BaseHTTPRequestHandler):
                     str(payload.get("username", "")),
                     str(payload.get("password", "")),
                     poll=bool(payload.get("poll")),
+                    pending_settings=payload.get("pending_settings"),
                 )
             elif cmd == "login_by_sessionid":
                 result = ig.rpc_login_by_sessionid(str(payload.get("sessionid", "")))
@@ -77,6 +78,7 @@ class handler(BaseHTTPRequestHandler):
                     str(payload.get("username", "")),
                     str(payload.get("password", "")),
                     str(payload.get("code", "")),
+                    pending_settings=payload.get("pending_settings"),
                 )
             elif cmd == "logout":
                 result = ig.rpc_logout(payload.get("session", {}))

@@ -13,10 +13,10 @@ const REPO_ROOT = path.resolve(/*turbopackIgnore: true*/ process.cwd())
 const SCRIPT_PATH = path.join(REPO_ROOT, 'instagram_search.py')
 
 export type IgCommand =
-  | { cmd: 'login'; username: string; password: string; poll?: boolean }
+  | { cmd: 'login'; username: string; password: string; poll?: boolean; pending_settings?: Record<string, unknown> }
   | { cmd: 'browser_login'; timeout_seconds?: number }
   | { cmd: 'login_by_sessionid'; sessionid: string }
-  | { cmd: 'challenge'; username: string; password: string; code: string }
+  | { cmd: 'challenge'; username: string; password: string; code: string; pending_settings?: Record<string, unknown> }
   | { cmd: 'logout'; session: Record<string, unknown> }
   | {
       cmd: 'search'
@@ -64,6 +64,8 @@ export interface IgFailure {
   verification_method?: IgVerificationMethod
   /** Every method named in Instagram's response. Empty detection becomes ["unknown"]. */
   verification_methods?: IgVerificationMethod[]
+  /** Device/session settings captured at challenge time (server-only use). */
+  pending_settings?: Record<string, unknown>
 }
 
 /** Canonical user-facing messages keyed by error code */
@@ -90,6 +92,7 @@ export function classifyIgError(
     isInfra?: boolean
     verification_method?: string
     verification_methods?: string[]
+    pending_settings?: Record<string, unknown>
   } = {},
 ): IgFailure {
   if (opts.isInfra) {
@@ -127,6 +130,7 @@ export function classifyIgError(
     ...(opts.challenge_required || code === 'CHALLENGE' ? { challenge_required: true } : {}),
     ...(verificationMethod ? { verification_method: verificationMethod } : {}),
     ...(verificationMethods.length ? { verification_methods: verificationMethods } : {}),
+    ...(opts.pending_settings ? { pending_settings: opts.pending_settings } : {}),
   }
 }
 
@@ -185,6 +189,7 @@ async function runViaHttp(payload: IgCommand, timeoutMs: number, workerUrl: stri
         challenge_required: (data as IgFailure).challenge_required,
         verification_method: (data as IgFailure).verification_method,
         verification_methods: (data as IgFailure).verification_methods,
+        pending_settings: (data as IgFailure).pending_settings,
       })
     }
     console.log('[instagram.ts] worker result ok=true')
@@ -249,6 +254,7 @@ function runViaSubprocess(payload: IgCommand, timeoutMs: number): Promise<IgResp
               challenge_required: (parsed as IgFailure).challenge_required,
               verification_method: (parsed as IgFailure).verification_method,
               verification_methods: (parsed as IgFailure).verification_methods,
+              pending_settings: (parsed as IgFailure).pending_settings,
             }))
             return
           }

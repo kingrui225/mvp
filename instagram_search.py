@@ -896,6 +896,9 @@ def _challenge_payload(username: str, methods: Optional[List[str]] = None) -> di
         "verification_methods": methods,
         "error": f"Instagram is asking for {named}.",
     }
+    saved = _pending_login_settings.get(username)
+    if isinstance(saved, dict):
+        payload["pending_settings"] = saved
     _last_challenge[username] = payload
     return payload
 
@@ -907,7 +910,12 @@ def _remember_pending_login(username: str, client) -> None:
         print(f"[rpc_login] could not save pending settings: {type(e).__name__}", flush=True)
 
 
-def rpc_login(username: str, password: str, poll: bool = False) -> dict:
+def rpc_login(
+    username: str,
+    password: str,
+    poll: bool = False,
+    pending_settings: Optional[dict] = None,
+) -> dict:
     """
     Attempt direct instagrapi login (no Selenium).
     Returns the session settings dict on success so the caller can persist it.
@@ -934,7 +942,7 @@ def rpc_login(username: str, password: str, poll: bool = False) -> dict:
         return _last_challenge[username]
 
     cl = _make_client()
-    saved = _pending_login_settings.get(username)
+    saved = pending_settings or _pending_login_settings.get(username)
     if saved:
         cl.set_settings(saved)
         print(f"[rpc_login] reusing pending device settings for {username}", flush=True)
@@ -1167,13 +1175,18 @@ def rpc_browser_login(timeout_seconds: int = 300) -> dict:
         return {"ok": False, "error": f"Browser login error: {type(e).__name__}: {e}"}
 
 
-def rpc_challenge(username: str, password: str, code: str) -> dict:
+def rpc_challenge(
+    username: str,
+    password: str,
+    code: str,
+    pending_settings: Optional[dict] = None,
+) -> dict:
     """
     Finish a login that asked for an email or SMS code.
     Reuses the device settings from the first attempt when they are still in memory.
     """
     cl = _make_client()
-    saved = _pending_login_settings.get(username)
+    saved = pending_settings or _pending_login_settings.get(username)
     if saved:
         cl.set_settings(saved)
         print(f"[rpc_challenge] reusing pending device settings for {username}", flush=True)
@@ -1594,6 +1607,8 @@ def handle_json_rpc() -> None:
             result = rpc_login(
                 str(payload.get("username", "")),
                 str(payload.get("password", "")),
+                poll=bool(payload.get("poll")),
+                pending_settings=payload.get("pending_settings"),
             )
         elif cmd == "login_by_sessionid":
             result = rpc_login_by_sessionid(str(payload.get("sessionid", "")))
@@ -1604,6 +1619,7 @@ def handle_json_rpc() -> None:
                 str(payload.get("username", "")),
                 str(payload.get("password", "")),
                 str(payload.get("code", "")),
+                pending_settings=payload.get("pending_settings"),
             )
         elif cmd == "search":
             result = rpc_search(payload)

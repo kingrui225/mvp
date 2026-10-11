@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireUser } from '@/lib/auth'
 import { checkRateLimit, clientIp, hashIp, recordRateLimit } from '@/lib/rate-limit'
-import { encrypt } from '@/lib/encrypt'
+import { encrypt, decrypt } from '@/lib/encrypt'
 import { runInstagramCommand, IgFailure } from '@/lib/instagram'
 import { createClient } from '@/lib/supabase/server'
 import { createAdminClient } from '@/lib/supabase/admin'
@@ -37,6 +37,58 @@ async function persistSession(
 
   if (sessionError) return { ok: false as const }
   return { ok: true as const, username: result.username ?? fallbackUsername, user_id: result.user_id ?? null }
+}
+
+async function getPendingChallengeSettings(userId: string, username: string): Promise<Record<string, unknown> | undefined> {
+  const admin = createAdminClient()
+  const { data } = await admin
+    .from('instagram_login_challenge_events')
+    .select('status, pending_settings_blob')
+    .eq('user_id', userId)
+    .eq('ig_username', username)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (!data || data.status !== 'pending' || !data.pending_settings_blob) return undefined
+  try {
+    return JSON.parse(decrypt(data.pending_settings_blob)) as Record<string, unknown>
+  } catch {
+    console.error('[ig/connect] pending settings decrypt failed for user=%s username=%s', userId, username)
+    return undefined
+  }
+}
+
+async function persistPendingChallenge(
+  userId: string,
+  username: string,
+  pendingSettings?: Record<string, unknown>,
+  verificationMethods?: string[],
+) {
+  const admin = createAdminClient()
+  const payload = {
+    user_id: userId,
+    ig_username: username,
+    status: 'pending',
+    pending_settings_blob: pendingSettings ? encrypt(JSON.stringify(pendingSettings)) : null,
+    verification_methods: verificationMethods && verificationMethods.length ? verificationMethods : null,
+  }
+  const { error } = await admin.from('instagram_login_challenge_events').insert(payload)
+  if (error) {
+    console.error('[ig/connect] failed to persist pending challenge user=%s username=%s err=%s', userId, username, error.message)
+  }
+}
+
+async function clearPendingChallenge(userId: string, username: string, status: 'resolved' | 'failed') {
+  const admin = createAdminClient()
+  const { error } = await admin.from('instagram_login_challenge_events').insert({
+    user_id: userId,
+    ig_username: username,
+    status,
+  })
+  if (error) {
+    console.error('[ig/connect] failed to clear pending challenge user=%s username=%s err=%s', userId, username, error.message)
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -134,7 +186,14 @@ export async function POST(req: NextRequest) {
 
   try {
     console.log('[ig/connect] calling runInstagramCommand login for', username, isCheck ? '(poll)' : '')
-    const result = await runInstagramCommand({ cmd: 'login', username, password, poll: isCheck })
+    const pendingSettings = await getPendingChallengeSettings(user.id, username)
+    const result = await runInstagramCommand({
+      cmd: 'login',
+      username,
+      password,
+      poll: isCheck,
+      pending_settings: pendingSettings,
+    })
 
     if (!result.ok) {
       const failure = result as IgFailure
@@ -144,6 +203,7 @@ export async function POST(req: NextRequest) {
         await recordRateLimit({ userId: user.id, ipHash, action: 'ig_connect', success: false })
       }
       if (failure.challenge_required) {
+        await persistPendingChallenge(user.id, username, failure.pending_settings, failure.verification_methods)
         return NextResponse.json({
           ok: false,
           challenge_required: true,
@@ -166,6 +226,7 @@ export async function POST(req: NextRequest) {
       await recordRateLimit({ userId: user.id, ipHash, action: 'ig_connect', success: false })
       return NextResponse.json({ ok: false, error: GENERIC_AUTH_ERROR }, { status: 500 })
     }
+    await clearPendingChallenge(user.id, username, 'resolved')
     await recordRateLimit({ userId: user.id, ipHash, action: 'ig_connect', success: true })
     return NextResponse.json({ ok: true, username: saved.username, user_id: saved.user_id })
   } finally {
