@@ -2,8 +2,12 @@
 
 import {
   AtSign,
+  ChevronDown,
+  ChevronUp,
   Clock,
   CreditCard,
+  Download,
+  FileText,
   Film,
   Hash,
   Heart,
@@ -11,12 +15,14 @@ import {
   LogOut,
   MapPin,
   MessageCircle,
+  Mic,
   Play,
   Search,
   Settings,
   Sparkles,
   Star,
   Trash2,
+  Volume2,
   X,
   Zap,
 } from 'lucide-react'
@@ -35,6 +41,18 @@ interface BillingStatus {
 
 type SearchType = 'top' | 'reel' | 'hashtag' | 'place'
 
+interface TranscriptResult {
+  text: string
+  language?: string
+  duration_seconds?: number
+  word_count?: number
+  model?: string
+  audio_storage_path?: string
+  transcript_storage_path?: string
+  segments?: Array<{ start: number; end: number; text: string }>
+  error?: string
+}
+
 interface PostResult {
   pk?: string
   code?: string
@@ -50,6 +68,7 @@ interface PostResult {
   username?: string
   user_pk?: string
   is_verified?: boolean
+  transcript?: TranscriptResult
 }
 
 interface SearchRecord {
@@ -116,88 +135,205 @@ function MediaTypeBadge({ type }: { type?: string }) {
   )
 }
 
+/** Fetches a short-lived signed URL for a Supabase Storage artifact. */
+async function fetchSignedUrl(storagePath: string): Promise<string> {
+  const res = await fetch(
+    `/api/transcripts/signed-url?path=${encodeURIComponent(storagePath)}&expires=3600`,
+  )
+  if (!res.ok) throw new Error('Could not generate download URL')
+  const d = await res.json()
+  return d.url as string
+}
+
+function TranscriptPanel({ transcript, postCode }: { transcript: TranscriptResult; postCode?: string }) {
+  const [expanded, setExpanded] = useState(false)
+  const [audioUrl, setAudioUrl] = useState<string | null>(null)
+  const [audioLoading, setAudioLoading] = useState(false)
+
+  const hasText = Boolean(transcript.text?.trim())
+  const hasAudio = Boolean(transcript.audio_storage_path)
+
+  async function handleAudioDownload() {
+    if (audioUrl || !transcript.audio_storage_path) return
+    setAudioLoading(true)
+    try {
+      const url = await fetchSignedUrl(transcript.audio_storage_path)
+      setAudioUrl(url)
+      // Open in new tab
+      window.open(url, '_blank', 'noopener,noreferrer')
+    } catch {
+      // ignore — user can retry
+    } finally {
+      setAudioLoading(false)
+    }
+  }
+
+  if (!hasText && !hasAudio) return null
+
+  return (
+    <div className="border-t border-[#f0f2f5]">
+      {/* Toggle button */}
+      <button
+        onClick={(e) => { e.preventDefault(); e.stopPropagation(); setExpanded((v) => !v) }}
+        className="flex w-full items-center gap-1.5 px-3 py-2 text-left text-[10px] font-semibold text-[#5a6675] transition hover:bg-[#f7f8fa]"
+      >
+        <Mic className="size-3 shrink-0 text-[#8b97a5]" />
+        <span className="flex-1">
+          Transcript
+          {transcript.word_count ? ` · ${transcript.word_count} words` : ''}
+          {transcript.language ? ` · ${transcript.language.toUpperCase()}` : ''}
+        </span>
+        {expanded ? <ChevronUp className="size-3 text-[#a3acb7]" /> : <ChevronDown className="size-3 text-[#a3acb7]" />}
+      </button>
+
+      {/* Expanded content */}
+      {expanded && (
+        <div className="px-3 pb-3">
+          {hasText && (
+            <p className="mb-2 max-h-40 overflow-y-auto rounded-lg bg-[#f5f6f8] p-2.5 text-[10px] leading-[1.65] text-[#475260]">
+              {transcript.text}
+            </p>
+          )}
+
+          {/* Action buttons */}
+          <div className="flex items-center gap-2">
+            {hasAudio && (
+              <button
+                onClick={(e) => { e.preventDefault(); e.stopPropagation(); void handleAudioDownload() }}
+                disabled={audioLoading}
+                className="flex items-center gap-1 rounded-md bg-[#17202b] px-2.5 py-1.5 text-[10px] font-semibold text-white transition hover:bg-[#2b3948] disabled:opacity-60"
+              >
+                {audioLoading
+                  ? <span className="size-2.5 animate-spin rounded-full border border-white/30 border-t-white" />
+                  : <Volume2 className="size-2.5" />}
+                Download MP3
+              </button>
+            )}
+            {transcript.transcript_storage_path && (
+              <button
+                onClick={async (e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  try {
+                    const url = await fetchSignedUrl(transcript.transcript_storage_path!)
+                    window.open(url, '_blank', 'noopener,noreferrer')
+                  } catch { /* ignore */ }
+                }}
+                className="flex items-center gap-1 rounded-md border border-[#e1e5ea] px-2.5 py-1.5 text-[10px] font-semibold text-[#5a6675] transition hover:bg-[#f0f2f5]"
+              >
+                <FileText className="size-2.5" />
+                JSON
+              </button>
+            )}
+            {transcript.duration_seconds != null && (
+              <span className="ml-auto text-[10px] text-[#a3acb7]">
+                {Math.floor(transcript.duration_seconds / 60)}:{String(Math.round(transcript.duration_seconds % 60)).padStart(2, '0')}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function PostCard({ post }: { post: PostResult }) {
   const [imgError, setImgError] = useState(false)
   const href = post.url ?? (post.code ? `https://www.instagram.com/p/${post.code}/` : '#')
+  const hasTranscript = Boolean(post.transcript?.text?.trim() || post.transcript?.audio_storage_path)
 
   return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="group flex flex-col overflow-hidden rounded-2xl border border-[#e8eaed] bg-white transition hover:-translate-y-0.5 hover:border-[#c8cdd3] hover:shadow-[0_4px_16px_rgba(23,32,43,0.10)]"
-    >
-      {/* Thumbnail */}
-      <div className="relative aspect-square w-full overflow-hidden bg-[#f0f2f5]">
-        {post.thumbnail_url && !imgError ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={post.thumbnail_url}
-            alt={post.caption ?? ''}
-            onError={() => setImgError(true)}
-            className="size-full object-cover transition group-hover:scale-[1.02]"
-          />
-        ) : (
-          <div className="flex size-full items-center justify-center text-[#c8cdd3]">
-            <Sparkles className="size-8" />
-          </div>
-        )}
-        {/* Media type badge */}
-        <div className="absolute right-2 top-2">
-          <MediaTypeBadge type={post.media_type} />
-        </div>
-        {/* Reel play icon overlay */}
-        {post.media_type === 'video' && (
-          <div className="absolute inset-0 flex items-center justify-center opacity-0 transition group-hover:opacity-100">
-            <div className="flex size-10 items-center justify-center rounded-full bg-black/40 backdrop-blur-sm">
-              <Play className="size-5 fill-white text-white" />
+    <div className="group flex flex-col overflow-hidden rounded-2xl border border-[#e8eaed] bg-white transition hover:-translate-y-0.5 hover:border-[#c8cdd3] hover:shadow-[0_4px_16px_rgba(23,32,43,0.10)]">
+      {/* Main clickable area → opens Instagram */}
+      <a
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="flex flex-col"
+      >
+        {/* Thumbnail */}
+        <div className="relative aspect-square w-full overflow-hidden bg-[#f0f2f5]">
+          {post.thumbnail_url && !imgError ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={post.thumbnail_url}
+              alt={post.caption ?? ''}
+              onError={() => setImgError(true)}
+              className="size-full object-cover transition group-hover:scale-[1.02]"
+            />
+          ) : (
+            <div className="flex size-full items-center justify-center text-[#c8cdd3]">
+              <Sparkles className="size-8" />
             </div>
+          )}
+          {/* Media type badge */}
+          <div className="absolute right-2 top-2 flex items-center gap-1">
+            {hasTranscript && (
+              <span className="flex items-center gap-0.5 rounded-md bg-[#17202b]/80 px-1.5 py-0.5 text-[9px] font-semibold text-white backdrop-blur-sm">
+                <Mic className="size-2" />
+                Transcript
+              </span>
+            )}
+            <MediaTypeBadge type={post.media_type} />
           </div>
-        )}
-      </div>
-
-      {/* Meta */}
-      <div className="flex flex-col gap-2 p-3">
-        {/* Stats row */}
-        <div className="flex items-center gap-3 text-xs text-[#7a8593]">
-          {post.like_count != null && (
-            <span className="flex items-center gap-1">
-              <Heart className="size-3.5" />
-              {formatCount(post.like_count)}
-            </span>
-          )}
-          {post.comment_count != null && (
-            <span className="flex items-center gap-1">
-              <MessageCircle className="size-3.5" />
-              {formatCount(post.comment_count)}
-            </span>
-          )}
-          {post.view_count != null && (
-            <span className="flex items-center gap-1">
-              <Play className="size-3.5" />
-              {formatCount(post.view_count)}
-            </span>
-          )}
-          {post.taken_at && (
-            <span className="ml-auto shrink-0">{timeAgo(post.taken_at)}</span>
+          {/* Reel play icon overlay */}
+          {post.media_type === 'video' && (
+            <div className="absolute inset-0 flex items-center justify-center opacity-0 transition group-hover:opacity-100">
+              <div className="flex size-10 items-center justify-center rounded-full bg-black/40 backdrop-blur-sm">
+                <Play className="size-5 fill-white text-white" />
+              </div>
+            </div>
           )}
         </div>
 
-        {/* Username */}
-        {post.username && (
-          <p className="truncate text-[11px] font-semibold text-[#273442]">
-            @{post.username}
-          </p>
-        )}
+        {/* Meta */}
+        <div className="flex flex-col gap-2 p-3">
+          {/* Stats row */}
+          <div className="flex items-center gap-3 text-xs text-[#7a8593]">
+            {post.like_count != null && (
+              <span className="flex items-center gap-1">
+                <Heart className="size-3.5" />
+                {formatCount(post.like_count)}
+              </span>
+            )}
+            {post.comment_count != null && (
+              <span className="flex items-center gap-1">
+                <MessageCircle className="size-3.5" />
+                {formatCount(post.comment_count)}
+              </span>
+            )}
+            {post.view_count != null && (
+              <span className="flex items-center gap-1">
+                <Play className="size-3.5" />
+                {formatCount(post.view_count)}
+              </span>
+            )}
+            {post.taken_at && (
+              <span className="ml-auto shrink-0">{timeAgo(post.taken_at)}</span>
+            )}
+          </div>
 
-        {/* Caption */}
-        {post.caption && (
-          <p className="text-[11px] leading-4 text-[#657180]">
-            {truncateCaption(post.caption)}
-          </p>
-        )}
-      </div>
-    </a>
+          {/* Username */}
+          {post.username && (
+            <p className="truncate text-[11px] font-semibold text-[#273442]">
+              @{post.username}
+            </p>
+          )}
+
+          {/* Caption */}
+          {post.caption && (
+            <p className="text-[11px] leading-4 text-[#657180]">
+              {truncateCaption(post.caption)}
+            </p>
+          )}
+        </div>
+      </a>
+
+      {/* Transcript panel — outside the <a> so clicks don't navigate */}
+      {hasTranscript && post.transcript && (
+        <TranscriptPanel transcript={post.transcript} postCode={post.code} />
+      )}
+    </div>
   )
 }
 
@@ -666,7 +802,7 @@ export default function SearchPage() {
                     <Sparkles className="size-6 text-[#17202b]" />
                   </div>
                   <p className="text-sm font-medium text-[#657180]">Searching Instagram…</p>
-                  <p className="text-xs text-[#a3acb7]">This may take a moment.</p>
+                  <p className="text-xs text-[#a3acb7]">Fetching reels and transcribing audio — this may take a minute.</p>
                 </div>
               )}
 

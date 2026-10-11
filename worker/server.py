@@ -30,6 +30,24 @@ WORKER_SECRET = os.environ.get("WORKER_SECRET", "").strip()
 app = FastAPI(title="Instagram Worker", docs_url=None, redoc_url=None)
 
 
+# ── Startup: pre-warm ffmpeg path and Whisper model if configured ─────────────
+# Runs in a daemon thread so the HTTP server is ready immediately.
+
+import threading as _threading
+
+def _startup_preload():
+    # Initialise the ffmpeg path resolver once
+    try:
+        ig._get_ffmpeg()
+    except Exception as exc:
+        print(f"[worker] ffmpeg init error: {exc}", flush=True)
+
+    # Pre-download and cache the Whisper model (skipped if WHISPER_MODEL is unset)
+    ig.preload_whisper_model()
+
+_threading.Thread(target=_startup_preload, daemon=True).start()
+
+
 # ── Auth dependency ───────────────────────────────────────────────────────────
 
 def verify_secret(request: Request):

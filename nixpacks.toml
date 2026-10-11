@@ -1,0 +1,7 @@
+# Railway / Nixpacks build config
+# Adds ffmpeg to the environment so the reel transcription pipeline can
+# use it for audio extraction and denoising.
+# static-ffmpeg (in requirements.txt) also bundles its own binary as a fallback.
+
+[phases.setup]
+nixPkgs = ["ffmpeg"]

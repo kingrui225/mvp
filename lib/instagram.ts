@@ -18,7 +18,17 @@ export type IgCommand =
   | { cmd: 'login_by_sessionid'; sessionid: string }
   | { cmd: 'challenge'; username: string; password: string; code: string }
   | { cmd: 'logout'; session: Record<string, unknown> }
-  | { cmd: 'search'; query: string; search_type: string; limit: number; session?: Record<string, unknown> }
+  | {
+      cmd: 'search'
+      query: string
+      search_type: string
+      limit: number
+      session?: Record<string, unknown>
+      /** When true the worker downloads, denoises, and transcribes video results. */
+      transcribe?: boolean
+      /** Supabase user UUID — used for storage path scoping on the worker. */
+      user_id?: string
+    }
 
 export interface IgSuccess {
   ok: true

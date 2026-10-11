@@ -5,8 +5,48 @@ import { createAdminClient } from '@/lib/supabase/admin'
 import { decrypt } from '@/lib/encrypt'
 import { runInstagramCommand } from '@/lib/instagram'
 import { hasActiveSubscription } from '@/lib/entitlement'
+import { enrichPostsFromApify } from '@/lib/apify-metrics'
+
+export const maxDuration = 300
 
 export type SearchType = 'top' | 'reel' | 'hashtag' | 'place'
+
+/** Word-level entry from Faster-Whisper with timestamps. */
+export interface TranscriptWord {
+  word: string
+  start: number
+  end: number
+  prob: number
+}
+
+/** Time-stamped speech segment. */
+export interface TranscriptSegment {
+  start: number
+  end: number
+  text: string
+  words?: TranscriptWord[]
+}
+
+/** Full transcription result for a single reel. */
+export interface TranscriptResult {
+  /** Plain-text transcript joining all segments. */
+  text: string
+  /** ISO 639-1 language code detected by Whisper. */
+  language?: string
+  /** Audio duration in seconds. */
+  duration_seconds?: number
+  word_count?: number
+  /** Whisper model used (e.g. "large-v2", "medium"). */
+  model?: string
+  /** Supabase Storage path for the denoised MP3 (bucket: reel-artifacts). */
+  audio_storage_path?: string
+  /** Supabase Storage path for the transcript JSON with timestamps. */
+  transcript_storage_path?: string
+  /** Per-segment transcription with optional word timestamps. */
+  segments?: TranscriptSegment[]
+  /** Set if transcription failed — search result is still returned. */
+  error?: string
+}
 
 export interface PostResult {
   pk?: string
@@ -23,6 +63,8 @@ export interface PostResult {
   username?: string
   user_pk?: string
   is_verified?: boolean
+  /** Populated for video results when WHISPER_MODEL is configured on the worker. */
+  transcript?: TranscriptResult
 }
 
 export interface SearchRecord {
@@ -113,6 +155,15 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // ── Determine transcription mode ─────────────────────────────────────────
+  // Transcription is enabled when WHISPER_MODEL is set on the worker.
+  // We always send transcribe:true — the Python side skips if not configured.
+  const transcribeEnabled = true
+
+  // Use a longer command timeout when transcription may run.
+  // Each reel: ~30–90s (download + denoise + whisper). Cap = WHISPER_MAX_REELS (default 5).
+  const commandTimeoutMs = transcribeEnabled ? 240_000 : 120_000
+
   // ── Run search via JSON-RPC ───────────────────────────────────────────────
   try {
     const result = await runInstagramCommand(
@@ -122,19 +173,21 @@ export async function POST(req: NextRequest) {
         search_type: searchType,
         limit,
         session: sessionData ?? undefined,
+        transcribe: transcribeEnabled,
+        user_id: user.id,
       },
-      120_000,
+      commandTimeoutMs,
     )
 
     if (!result.ok) {
       return NextResponse.json({ error: result.error ?? 'Search failed.' }, { status: 500 })
     }
 
-    const rawResults = (result.results ?? []) as PostResult[]
+    const rawResults = await enrichPostsFromApify((result.results ?? []) as PostResult[])
     const searchEventId = randomUUID()
     const now = new Date().toISOString()
 
-    // ── Persist to Supabase (append-only) ────────────────────────────────────
+    // ── Persist search event ───────────────────────────────────────────────
     const { error: evErr } = await supabase
       .from('search_events')
       .insert({
@@ -151,6 +204,7 @@ export async function POST(req: NextRequest) {
       console.error('[search] Failed to insert search_event:', evErr.message)
     }
 
+    // ── Persist search result events ───────────────────────────────────────
     if (rawResults.length > 0) {
       const rows = rawResults.map((r) => ({
         search_event_id: searchEventId,
@@ -175,6 +229,39 @@ export async function POST(req: NextRequest) {
       const { error: resErr } = await supabase.from('search_result_events').insert(rows)
       if (resErr) {
         console.error('[search] Failed to insert search_result_events:', resErr.message)
+      }
+    }
+
+    // ── Persist reel transcript metadata ──────────────────────────────────
+    const transcriptRows = rawResults
+      .filter((r) => r.code && r.transcript)
+      .map((r) => {
+        const t = r.transcript!
+        const failed = Boolean(t.error)
+        return {
+          search_event_id: searchEventId,
+          user_id: user.id,
+          post_code: r.code!,
+          post_url: r.url ?? null,
+          audio_storage_path: t.audio_storage_path ?? null,
+          transcript_storage_path: t.transcript_storage_path ?? null,
+          transcript_text: failed ? null : (t.text || null),
+          language: t.language ?? null,
+          duration_seconds: t.duration_seconds ?? null,
+          word_count: t.word_count ?? null,
+          whisper_model: t.model ?? null,
+          status: failed ? 'failed' : 'complete',
+          error_message: t.error ?? null,
+          created_at: now,
+        }
+      })
+
+    if (transcriptRows.length > 0) {
+      const { error: tErr } = await supabase.from('reel_transcript_events').insert(transcriptRows)
+      if (tErr) {
+        console.error('[search] Failed to insert reel_transcript_events:', tErr.message)
+      } else {
+        console.log('[search] Persisted %d transcript(s)', transcriptRows.length)
       }
     }
 

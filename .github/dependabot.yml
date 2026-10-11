@@ -1,0 +1,49 @@
+version: 2
+
+updates:
+  # ── Python / pip ──────────────────────────────────────────────────────────
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: daily
+      time: "06:00"
+      timezone: "America/Los_Angeles"
+    labels:
+      - "dependencies"
+      - "python"
+    open-pull-requests-limit: 10
+    # Group all non-instagrapi pip bumps into one PR to reduce noise
+    groups:
+      transcription-stack:
+        patterns:
+          - "faster-whisper"
+          - "static-ffmpeg"
+          - "ctranslate2"
+      web-framework:
+        patterns:
+          - "fastapi"
+          - "uvicorn"
+          - "pydantic"
+
+  # ── npm / pnpm ────────────────────────────────────────────────────────────
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Los_Angeles"
+    labels:
+      - "dependencies"
+      - "javascript"
+    open-pull-requests-limit: 5
+    groups:
+      next-stack:
+        patterns:
+          - "next"
+          - "react"
+          - "react-dom"
+          - "@types/react*"
+      supabase:
+        patterns:
+          - "@supabase/*"

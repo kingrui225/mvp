@@ -22,8 +22,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
+import tempfile
+import threading
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -92,6 +97,28 @@ class SessionBundle(BaseModel):
 MEDIA_TYPE_MAP = {1: "photo", 2: "video", 8: "carousel"}
 
 
+class TranscriptSegment(BaseModel):
+    """One time-stamped speech segment from Faster-Whisper."""
+    start: float
+    end: float
+    text: str
+    words: Optional[List[Dict[str, Any]]] = None  # [{word, start, end, prob}]
+
+
+class TranscriptResult(BaseModel):
+    """High-fidelity transcription of a reel's audio track."""
+    text: str = ""
+    language: Optional[str] = None
+    duration_seconds: Optional[float] = None
+    word_count: Optional[int] = None
+    model: Optional[str] = None
+    # Supabase Storage paths (bucket = reel-artifacts)
+    audio_storage_path: Optional[str] = None      # {user_id}/{code}/audio.mp3
+    transcript_storage_path: Optional[str] = None # {user_id}/{code}/transcript.json
+    segments: Optional[List[Dict[str, Any]]] = None
+    error: Optional[str] = None  # set when transcription partially failed
+
+
 class PostResult(BaseModel):
     """Normalised representation of a single Instagram post / reel / carousel."""
 
@@ -109,6 +136,7 @@ class PostResult(BaseModel):
     username: Optional[str] = None
     user_pk: Optional[str] = None
     is_verified: Optional[bool] = None
+    transcript: Optional[TranscriptResult] = None  # populated when transcription requested
 
 
 # ---------------------------------------------------------------------------
@@ -1189,6 +1217,285 @@ def rpc_logout(session: dict) -> dict:
         return {"ok": True, "warning": f"Could not confirm logout: {type(e).__name__}"}
 
 
+# ---------------------------------------------------------------------------
+# Reel transcription engine
+# ---------------------------------------------------------------------------
+
+# ffmpeg binary: prefer static-ffmpeg's bundled binary, fall back to PATH.
+_FFMPEG: Optional[str] = None
+_FFMPEG_LOCK = threading.Lock()
+
+
+def _get_ffmpeg() -> str:
+    global _FFMPEG
+    if _FFMPEG:
+        return _FFMPEG
+    with _FFMPEG_LOCK:
+        if _FFMPEG:
+            return _FFMPEG
+        try:
+            import static_ffmpeg
+            static_ffmpeg.add_paths()
+            _FFMPEG = "ffmpeg"
+            print("[transcribe] Using static-ffmpeg binary", flush=True)
+        except ImportError:
+            # Fall back to system ffmpeg
+            _FFMPEG = "ffmpeg"
+            print("[transcribe] static-ffmpeg not installed, using system ffmpeg", flush=True)
+        return _FFMPEG
+
+
+# Faster-Whisper model cache — loaded once per process, reused across requests.
+_WHISPER_MODEL = None
+_WHISPER_MODEL_NAME: Optional[str] = None
+_WHISPER_LOCK = threading.Lock()
+
+# ffmpeg audio denoise filter chain for voice clarity.
+# highpass: remove low-frequency hum/rumble below 80 Hz
+# lowpass:  remove high-frequency hiss above 8 kHz (keeps voice band)
+# afftdn:   FFT-based spectral noise reduction (-25 dB floor)
+# dynaudnorm: dynamic loudness normalization so quiet speech is audible
+_DENOISE_FILTER = "highpass=f=80,lowpass=f=8000,afftdn=nf=-25,dynaudnorm=f=200:g=15"
+_DENOISE_FILTER_SIMPLE = "highpass=f=80,lowpass=f=8000,dynaudnorm=f=200:g=15"
+
+
+def _get_whisper_model():
+    """Load and cache the Faster-Whisper model. Thread-safe."""
+    global _WHISPER_MODEL, _WHISPER_MODEL_NAME
+    model_name = os.environ.get("WHISPER_MODEL", "medium")
+    with _WHISPER_LOCK:
+        if _WHISPER_MODEL is None or _WHISPER_MODEL_NAME != model_name:
+            print(f"[whisper] Loading model={model_name} (this may take a while on first run)...", flush=True)
+            try:
+                from faster_whisper import WhisperModel
+                model_dir = os.environ.get("WHISPER_MODEL_DIR", "/tmp/whisper_models")
+                _WHISPER_MODEL = WhisperModel(
+                    model_name,
+                    device="cpu",
+                    compute_type="int8",
+                    download_root=model_dir,
+                )
+                _WHISPER_MODEL_NAME = model_name
+                print(f"[whisper] Model ready: {model_name}", flush=True)
+            except Exception as exc:
+                print(f"[whisper] Failed to load model {model_name}: {exc}", file=sys.stderr, flush=True)
+                raise
+    return _WHISPER_MODEL
+
+
+def preload_whisper_model() -> None:
+    """Call at worker startup to warm the model before the first request arrives."""
+    if not os.environ.get("WHISPER_MODEL"):
+        return
+    try:
+        from faster_whisper import WhisperModel  # noqa: F401 — check installable
+        _get_whisper_model()
+    except Exception:
+        pass  # Non-fatal: model will be loaded on first transcription request
+
+
+def _upload_to_supabase_storage(
+    data: bytes,
+    bucket: str,
+    object_path: str,
+    content_type: str,
+    supabase_url: str,
+    supabase_key: str,
+) -> None:
+    """Upload bytes to Supabase Storage via REST API (POST with x-upsert)."""
+    url = f"{supabase_url}/storage/v1/object/{bucket}/{object_path}"
+    req = urllib.request.Request(url, data=data, method="POST")
+    req.add_header("Authorization", f"Bearer {supabase_key}")
+    req.add_header("Content-Type", content_type)
+    req.add_header("x-upsert", "true")
+    try:
+        with urllib.request.urlopen(req, timeout=120):
+            pass
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")[:300]
+        raise RuntimeError(f"Supabase Storage upload failed HTTP {exc.code}: {body}") from exc
+
+
+def _run_ffmpeg(args: List[str], timeout: int = 120) -> subprocess.CompletedProcess:
+    ffmpeg = _get_ffmpeg()
+    return subprocess.run(
+        [ffmpeg, "-y", "-loglevel", "error"] + args,
+        capture_output=True,
+        timeout=timeout,
+    )
+
+
+def transcribe_reel(
+    video_url: str,
+    post_code: str,
+    user_id: str,
+    supabase_url: str = "",
+    supabase_key: str = "",
+) -> TranscriptResult:
+    """
+    Pipeline: download reel audio → denoise → Faster-Whisper → upload to Supabase Storage.
+
+    Audio is extracted as 16 kHz mono WAV for optimal Whisper accuracy,
+    denoised with ffmpeg's FFT-based filter chain, then encoded as MP3 for storage.
+    Transcription uses beam_size=5 + VAD + word-level timestamps for maximum fidelity.
+
+    Raises on hard failure (e.g. download error, model not installed).
+    Individual upload failures are logged but don't raise.
+    """
+    model_name = os.environ.get("WHISPER_MODEL", "medium")
+    bucket = "reel-artifacts"
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp = Path(tmp_dir)
+        raw_wav = tmp / "raw.wav"
+        denoised_wav = tmp / "denoised.wav"
+        denoised_mp3 = tmp / "audio.mp3"
+
+        # ── Step 1: Download reel and extract audio as 16 kHz mono WAV ──────
+        print(f"[transcribe] {post_code}: downloading audio", flush=True)
+        dl = _run_ffmpeg(
+            ["-i", video_url,
+             "-vn",                    # audio only — skip video stream
+             "-acodec", "pcm_s16le",   # raw 16-bit PCM
+             "-ar", "16000",           # 16 kHz — Whisper's native rate
+             "-ac", "1",               # mono
+             str(raw_wav)],
+            timeout=120,
+        )
+        if dl.returncode != 0:
+            err = dl.stderr.decode("utf-8", errors="replace")[-400:]
+            raise RuntimeError(f"Audio download failed (ffmpeg rc={dl.returncode}): {err}")
+
+        # ── Step 2: Denoise with ffmpeg filter chain ─────────────────────────
+        print(f"[transcribe] {post_code}: denoising audio", flush=True)
+        dn = _run_ffmpeg(
+            ["-i", str(raw_wav),
+             "-af", _DENOISE_FILTER,
+             "-ar", "16000", "-ac", "1",
+             str(denoised_wav)],
+            timeout=60,
+        )
+        if dn.returncode != 0:
+            # afftdn may not be available in all builds — fall back to simpler chain
+            print(f"[transcribe] {post_code}: full denoise filter failed, trying simpler chain", flush=True)
+            dn2 = _run_ffmpeg(
+                ["-i", str(raw_wav),
+                 "-af", _DENOISE_FILTER_SIMPLE,
+                 "-ar", "16000", "-ac", "1",
+                 str(denoised_wav)],
+                timeout=60,
+            )
+            if dn2.returncode != 0:
+                print(f"[transcribe] {post_code}: denoise failed entirely, using raw audio", flush=True)
+                denoised_wav = raw_wav  # type: ignore[assignment]
+
+        # ── Step 3: Encode denoised WAV → MP3 for storage ───────────────────
+        print(f"[transcribe] {post_code}: encoding MP3", flush=True)
+        mp3 = _run_ffmpeg(
+            ["-i", str(denoised_wav),
+             "-acodec", "libmp3lame",
+             "-b:a", "128k",
+             str(denoised_mp3)],
+            timeout=60,
+        )
+        mp3_ok = mp3.returncode == 0 and denoised_mp3.exists()
+
+        # ── Step 4: Transcribe with Faster-Whisper ───────────────────────────
+        print(f"[transcribe] {post_code}: running Faster-Whisper model={model_name}", flush=True)
+        model = _get_whisper_model()
+        segments_iter, info = model.transcribe(
+            str(denoised_wav),
+            beam_size=5,
+            vad_filter=True,           # Voice Activity Detection removes silence/noise
+            word_timestamps=True,      # per-word timing for high-fidelity output
+            language=None,             # auto-detect
+        )
+
+        segments: List[Dict[str, Any]] = []
+        text_parts: List[str] = []
+        for seg in segments_iter:
+            seg_d: Dict[str, Any] = {
+                "start": round(seg.start, 3),
+                "end": round(seg.end, 3),
+                "text": seg.text.strip(),
+            }
+            if seg.words:
+                seg_d["words"] = [
+                    {
+                        "word": w.word,
+                        "start": round(w.start, 3),
+                        "end": round(w.end, 3),
+                        "prob": round(w.probability, 3),
+                    }
+                    for w in seg.words
+                ]
+            segments.append(seg_d)
+            if seg.text.strip():
+                text_parts.append(seg.text.strip())
+
+        transcript_text = " ".join(text_parts)
+        word_count = len(transcript_text.split()) if transcript_text else 0
+        duration = round(info.duration, 2)
+        language = info.language
+
+        print(
+            f"[transcribe] {post_code}: done lang={language} dur={duration}s words={word_count}",
+            flush=True,
+        )
+
+        # ── Step 5: Upload artifacts to Supabase Storage ─────────────────────
+        audio_path: Optional[str] = None
+        transcript_path: Optional[str] = None
+
+        if supabase_url and supabase_key:
+            # Upload MP3
+            if mp3_ok:
+                try:
+                    audio_obj = f"{user_id}/{post_code}/audio.mp3"
+                    _upload_to_supabase_storage(
+                        denoised_mp3.read_bytes(),
+                        bucket, audio_obj, "audio/mpeg",
+                        supabase_url, supabase_key,
+                    )
+                    audio_path = audio_obj
+                    print(f"[transcribe] {post_code}: uploaded audio → {audio_obj}", flush=True)
+                except Exception as exc:
+                    print(f"[transcribe] {post_code}: audio upload failed: {exc}", file=sys.stderr, flush=True)
+
+            # Upload transcript JSON
+            try:
+                transcript_payload = {
+                    "language": language,
+                    "duration": duration,
+                    "model": model_name,
+                    "word_count": word_count,
+                    "segments": segments,
+                }
+                t_obj = f"{user_id}/{post_code}/transcript.json"
+                _upload_to_supabase_storage(
+                    json.dumps(transcript_payload, ensure_ascii=False, indent=2).encode("utf-8"),
+                    bucket, t_obj, "application/json",
+                    supabase_url, supabase_key,
+                )
+                transcript_path = t_obj
+                print(f"[transcribe] {post_code}: uploaded transcript → {t_obj}", flush=True)
+            except Exception as exc:
+                print(f"[transcribe] {post_code}: transcript upload failed: {exc}", file=sys.stderr, flush=True)
+        else:
+            print(f"[transcribe] {post_code}: SUPABASE_URL/KEY not set — skipping artifact upload", flush=True)
+
+        return TranscriptResult(
+            text=transcript_text,
+            language=language,
+            duration_seconds=duration,
+            word_count=word_count,
+            model=model_name,
+            audio_storage_path=audio_path,
+            transcript_storage_path=transcript_path,
+            segments=segments,
+        )
+
+
 def rpc_search(payload: dict) -> dict:
     """
     Run a search using a caller-supplied session dict (pre-decrypted by TypeScript).
@@ -1198,6 +1505,8 @@ def rpc_search(payload: dict) -> dict:
     query = str(payload.get("query", "")).strip()
     search_type = str(payload.get("search_type", "top"))
     limit = int(payload.get("limit", DEFAULT_LIMIT))
+    transcribe = bool(payload.get("transcribe", False))
+    user_id = str(payload.get("user_id", "")).strip()
 
     if not session:
         return {
@@ -1210,7 +1519,49 @@ def rpc_search(payload: dict) -> dict:
     cl = build_client_from_settings(session)
     try:
         output = search_instagram(cl, query=query, search_type=search_type, limit=limit)
-        return {"ok": True, **output}
+        results: List[Dict[str, Any]] = output.get("results", [])
+
+        # ── Transcription stage ───────────────────────────────────────────────
+        # Only runs when transcribe=True + user_id are sent in the payload.
+        # Capped at WHISPER_MAX_REELS per search to keep latency predictable.
+        if transcribe and user_id:
+            supabase_url = (
+                os.environ.get("SUPABASE_URL", "")
+                or os.environ.get("NEXT_PUBLIC_SUPABASE_URL", "")
+            ).rstrip("/")
+            supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+            max_reels = int(os.environ.get("WHISPER_MAX_REELS", "5"))
+
+            video_count = 0
+            for r in results:
+                if video_count >= max_reels:
+                    break
+                if r.get("media_type") != "video":
+                    continue
+                video_url = r.get("video_url")
+                post_code = r.get("code")
+                if not video_url or not post_code:
+                    continue
+
+                try:
+                    t = transcribe_reel(
+                        video_url=video_url,
+                        post_code=post_code,
+                        user_id=user_id,
+                        supabase_url=supabase_url,
+                        supabase_key=supabase_key,
+                    )
+                    r["transcript"] = t.model_dump(exclude_none=True)
+                except Exception as exc:
+                    print(
+                        f"[transcribe] {post_code}: failed: {type(exc).__name__}: {exc}",
+                        file=sys.stderr, flush=True,
+                    )
+                    r["transcript"] = {"text": "", "error": f"{type(exc).__name__}: {exc}"}
+
+                video_count += 1
+
+        return {"ok": True, **output, "results": results}
     except SystemExit:
         # search_instagram calls sys.exit() on rate-limit / auth errors.
         # Convert to an RPC failure so the caller gets a JSON response.

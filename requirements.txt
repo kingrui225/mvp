@@ -3,3 +3,6 @@ pydantic>=2.0.0,<3.0.0
 selenium>=4.15.0
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
+# Transcription pipeline
+faster-whisper>=1.0.0      # Faster-Whisper inference (CTranslate2 backend)
+static-ffmpeg>=2.5         # Bundles a static ffmpeg binary — no system dep needed
