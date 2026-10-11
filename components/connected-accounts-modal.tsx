@@ -19,6 +19,8 @@ interface Props {
 
 // Browser login (Selenium) is only available in local dev — not on Vercel.
 const BROWSER_LOGIN_AVAILABLE = process.env.NEXT_PUBLIC_BROWSER_LOGIN === 'true'
+const CHALLENGE_POLL_TIMEOUT_MS = 300_000
+const CHALLENGE_POLL_INTERVAL_MS = 6_000
 
 type ConnectMethod = 'browser' | 'credentials' | 'sessionid'
 type VerificationMethod = 'email' | 'sms' | 'totp' | 'app' | 'unknown'
@@ -78,7 +80,13 @@ export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Pr
     const started = Date.now()
 
     const check = async () => {
-      if (stopped || Date.now() - started > 120_000) return
+      if (stopped) return
+      if (Date.now() - started > CHALLENGE_POLL_TIMEOUT_MS) {
+        stopped = true
+        setChecking(false)
+        setError('Instagram approval timed out. Approve in the app, then click Check again or enter the code.')
+        return
+      }
       setChecking(true)
       try {
         const res = await fetch('/api/instagram/connect', {
@@ -108,7 +116,7 @@ export function ConnectedAccountsModal({ open, onClose, account, onChanged }: Pr
     }
 
     const first = setTimeout(check, 2000)
-    const timer = setInterval(check, 6000)
+    const timer = setInterval(check, CHALLENGE_POLL_INTERVAL_MS)
     return () => {
       stopped = true
       clearTimeout(first)

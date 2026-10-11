@@ -36,26 +36,36 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, ConfigDict, field_validator
 
 # ---------------------------------------------------------------------------
-# Patch instagrapi to use the current Instagram Android app version.
-# Instagram pushed v450 on 2026-10-04 and now rejects v449 User-Agent headers.
-# The bloks_versioning_id for v450 is not yet public; we reuse the v449 hash
-# which is only needed for the CAA username/password login flow — not for
-# session-based (sessionid / Selenium cookie) authentication.
+# Keep instagrapi on the freshest app profile available in its own catalog.
+#
+# Why:
+# - Hardcoding one app version quickly goes stale and triggers
+#   "Your version of Instagram is out of date" errors.
+# - Selecting the max known version_code from APP_SETTINGS lets us move forward
+#   automatically when instagrapi is upgraded.
 # ---------------------------------------------------------------------------
 try:
     import instagrapi.config as _ig_cfg
-    _NEW_VER = "450.0.0.41.77"
-    _NEW_VER_CODE = "385609976"
-    _OLD_HASH = _ig_cfg.APP_SETTINGS.get(
-        _ig_cfg.DEFAULT_APP_VERSION, {}
-    ).get("bloks_versioning_id", "")
-    if _NEW_VER not in _ig_cfg.APP_SETTINGS:
-        _ig_cfg.APP_SETTINGS[_NEW_VER] = {
-            "app_version": _NEW_VER,
-            "version_code": _NEW_VER_CODE,
-            "bloks_versioning_id": _OLD_HASH,
-        }
-    _ig_cfg.DEFAULT_APP_VERSION = _NEW_VER
+
+    def _to_int(v: str) -> int:
+        try:
+            return int(str(v))
+        except Exception:
+            return -1
+
+    if isinstance(_ig_cfg.APP_SETTINGS, dict) and _ig_cfg.APP_SETTINGS:
+        # Pick newest catalog entry by numeric version_code.
+        best_ver = max(
+            _ig_cfg.APP_SETTINGS.keys(),
+            key=lambda ver: _to_int(_ig_cfg.APP_SETTINGS.get(ver, {}).get("version_code", "-1")),
+        )
+        _ig_cfg.DEFAULT_APP_VERSION = best_ver
+        _best_code = _ig_cfg.APP_SETTINGS.get(best_ver, {}).get("version_code", "?")
+        _has_hash = bool(_ig_cfg.APP_SETTINGS.get(best_ver, {}).get("bloks_versioning_id"))
+        print(
+            f"[ig/app_profile] selected app_version={best_ver} version_code={_best_code} has_bloks_hash={_has_hash}",
+            flush=True,
+        )
 except Exception:
     pass  # If instagrapi isn't installed yet, skip silently
 
@@ -849,6 +859,42 @@ def _find_text(value: Any, key: str) -> str:
     return ""
 
 
+def _sanitize_last_json(last_json: Any) -> Dict[str, Any]:
+    """
+    Build a compact, non-sensitive summary of instagrapi's last_json payload.
+    This is for server logs only. Do not include cookies, IDs, or full payload.
+    """
+    if not isinstance(last_json, dict):
+        return {"type": type(last_json).__name__}
+
+    summary: Dict[str, Any] = {}
+    for key in ("status", "message", "error_type", "error_title", "step_name", "flow_render_type"):
+        value = last_json.get(key)
+        if isinstance(value, str) and value:
+            summary[key] = value[:200]
+
+    methods = _methods_from_payload(last_json)
+    if methods:
+        summary["verification_methods"] = methods
+
+    # Useful booleans to distinguish manual checkpoint vs code challenge.
+    summary["has_challenge"] = "challenge" in last_json
+    summary["native_flow"] = bool(_find_flag(last_json, "native_flow"))
+    summary["has_two_step_context"] = bool(_find_text(last_json, "two_step_verification_context"))
+
+    # Keep only key names for structural debugging.
+    summary["top_keys"] = sorted(str(k) for k in last_json.keys())[:40]
+    return summary
+
+
+def _log_instagram_last_json(tag: str, client) -> None:
+    try:
+        summary = _sanitize_last_json(getattr(client, "last_json", {}))
+        print(f"[{tag}] last_json_summary={json.dumps(summary, default=str)}", flush=True)
+    except Exception as e:
+        print(f"[{tag}] could not serialize last_json summary: {type(e).__name__}", flush=True)
+
+
 def _methods_from_payload(payload: Any) -> List[str]:
     """Read the verification methods Instagram actually named. Never guess email."""
     text = json.dumps(payload, default=str).lower() if payload else ""
@@ -938,14 +984,20 @@ def rpc_login(
     )
 
     now = time.time()
+    print(
+        f"[rpc_login] start username={username} poll={poll} external_pending={bool(pending_settings)}",
+        flush=True,
+    )
     if poll and now - _last_attempt_at.get(username, 0) < 5 and username in _last_challenge:
+        print(f"[rpc_login] returning cached challenge payload for {username}", flush=True)
         return _last_challenge[username]
 
     cl = _make_client()
     saved = pending_settings or _pending_login_settings.get(username)
     if saved:
         cl.set_settings(saved)
-        print(f"[rpc_login] reusing pending device settings for {username}", flush=True)
+        source = "external" if pending_settings else "memory"
+        print(f"[rpc_login] reusing pending device settings for {username} source={source}", flush=True)
 
     def _decline_interactive_code(_username: str, choice) -> str:
         methods = _methods_from_payload(getattr(cl, "last_json", {}))
@@ -977,7 +1029,10 @@ def rpc_login(
         methods = _methods_from_payload(getattr(cl, "last_json", {}))
         if "instagram app" in str(e).lower() or "checkpoint" in str(e).lower():
             methods.append("app")
-        print(f"[rpc_login] verification required {type(e).__name__} methods={methods or _pending_verification_methods.get(username)}", flush=True)
+        print(
+            f"[rpc_login] verification required {type(e).__name__} methods={methods or _pending_verification_methods.get(username)}",
+            flush=True,
+        )
         _remember_pending_login(username, cl)
         return _challenge_payload(username, methods)
     except TwoFactorRequired as e:
@@ -988,22 +1043,27 @@ def rpc_login(
         print(f"[rpc_login] auth failed {type(e).__name__}: {e}", flush=True)
         return {"ok": False, "error": "Authentication failed. Check your username and password."}
     except FeedbackRequired as e:
+        _log_instagram_last_json("rpc_login.feedback_required", cl)
         print(f"[rpc_login] FeedbackRequired: {e}", flush=True)
         return {"ok": False, "error": "Instagram blocked this login attempt. Try again later or use the browser login."}
     except (ClientThrottledError, RateLimitError) as e:
+        _log_instagram_last_json("rpc_login.rate_limited", cl)
         print(f"[rpc_login] rate-limited {type(e).__name__}: {e}", flush=True)
         return {"ok": False, "error": "Instagram is rate-limiting login attempts. Wait 10–30 minutes and try again."}
     except (SentryBlock, PleaseWaitFewMinutes) as e:
+        _log_instagram_last_json("rpc_login.blocked", cl)
         print(f"[rpc_login] blocked {type(e).__name__}: {e}", flush=True)
         return {"ok": False, "error": "Instagram is temporarily blocking automated access. Wait a few minutes and try again."}
     except UnknownError as e:
         import traceback
         traceback.print_exc(file=sys.stderr)
+        _log_instagram_last_json("rpc_login.unknown_error", cl)
         print(f"[rpc_login] UnknownError: {e}", flush=True)
         return {"ok": False, "error": f"Instagram returned an unexpected error: {e}"}
     except Exception as e:
         import traceback
         traceback.print_exc(file=sys.stderr)
+        _log_instagram_last_json("rpc_login.unhandled", cl)
         print(f"[rpc_login] unhandled {type(e).__name__}: {e}", flush=True)
         return {"ok": False, "error": f"Login error: {type(e).__name__}: {e}"}
 
@@ -1185,11 +1245,18 @@ def rpc_challenge(
     Finish a login that asked for an email or SMS code.
     Reuses the device settings from the first attempt when they are still in memory.
     """
+    print(
+        f"[rpc_challenge] start username={username} code_len={len(code)} external_pending={bool(pending_settings)}",
+        flush=True,
+    )
     cl = _make_client()
     saved = pending_settings or _pending_login_settings.get(username)
     if saved:
         cl.set_settings(saved)
-        print(f"[rpc_challenge] reusing pending device settings for {username}", flush=True)
+        source = "external" if pending_settings else "memory"
+        print(f"[rpc_challenge] reusing pending device settings for {username} source={source}", flush=True)
+    else:
+        print(f"[rpc_challenge] no pending settings for {username} (high risk of verification failure)", flush=True)
     cl.challenge_code_handler = lambda _u, _c: code
 
     try:
@@ -1205,6 +1272,7 @@ def rpc_challenge(
             "session": settings,
         }
     except Exception as e:
+        _log_instagram_last_json("rpc_challenge.failed", cl)
         print(f"[rpc_challenge] failed {type(e).__name__}: {e}", flush=True)
         return {"ok": False, "error": "Verification failed. Check the code and try again."}
 

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { randomUUID } from 'crypto'
 import { requireUser } from '@/lib/auth'
 import { checkRateLimit, clientIp, hashIp, recordRateLimit } from '@/lib/rate-limit'
 import { encrypt, decrypt } from '@/lib/encrypt'
@@ -92,6 +93,9 @@ async function clearPendingChallenge(userId: string, username: string, status: '
 }
 
 export async function POST(req: NextRequest) {
+  const attemptId = randomUUID().slice(0, 8)
+  const log = (msg: string, ...args: unknown[]) => console.log(`[ig/connect][${attemptId}] ${msg}`, ...args)
+  const logErr = (msg: string, ...args: unknown[]) => console.error(`[ig/connect][${attemptId}] ${msg}`, ...args)
   const { user, error } = await requireUser()
   if (error) return error
 
@@ -103,6 +107,7 @@ export async function POST(req: NextRequest) {
   }
 
   const ipHash = hashIp(clientIp(req.headers))
+  log('start method=%s user=%s', body.method ?? 'credentials', user.id)
 
   // ── Session ID login ─────────────────────────────────────────────────────────
   if (body.method === 'sessionid') {
@@ -115,12 +120,12 @@ export async function POST(req: NextRequest) {
     if (!limited.ok) return NextResponse.json({ error: limited.error }, { status: limited.status })
 
     try {
-      console.log('[ig/connect] sessionid login attempt')
+      log('sessionid login attempt')
       const result = await runInstagramCommand({ cmd: 'login_by_sessionid', sessionid })
 
       if (!result.ok) {
         const failure = result as IgFailure
-        console.error('[ig/connect] sessionid failed code=%s internal=%s', failure.code, failure._internalError ?? failure.error)
+        logErr('sessionid failed code=%s internal=%s', failure.code, failure._internalError ?? failure.error)
         await recordRateLimit({ userId: user.id, ipHash, action: 'ig_connect', success: false })
         return NextResponse.json({ ok: false, error: failure.error }, { status: 401 })
       }
@@ -131,9 +136,11 @@ export async function POST(req: NextRequest) {
 
       const saved = await persistSession(user.id, result, result.username ?? 'instagram')
       if (!saved.ok) {
+        logErr('sessionid persistSession failed')
         await recordRateLimit({ userId: user.id, ipHash, action: 'ig_connect', success: false })
         return NextResponse.json({ ok: false, error: GENERIC_AUTH_ERROR }, { status: 500 })
       }
+      log('sessionid success username=%s user_id=%s', saved.username, saved.user_id)
       await recordRateLimit({ userId: user.id, ipHash, action: 'ig_connect', success: true })
       return NextResponse.json({ ok: true, username: saved.username, user_id: saved.user_id })
     } finally {
@@ -150,7 +157,7 @@ export async function POST(req: NextRequest) {
     const result = await runInstagramCommand({ cmd: 'browser_login', timeout_seconds: 300 }, 330_000)
 
     if (!result.ok) {
-      console.error('[ig/connect] browser_login failed code=%s internal=%s', (result as IgFailure).code, (result as IgFailure)._internalError ?? result.error)
+      logErr('browser_login failed code=%s internal=%s', (result as IgFailure).code, (result as IgFailure)._internalError ?? result.error)
       await recordRateLimit({ userId: user.id, ipHash, action: 'ig_connect', success: false })
       return NextResponse.json({ ok: false, error: result.error }, { status: 401 })
     }
@@ -161,9 +168,11 @@ export async function POST(req: NextRequest) {
 
     const saved = await persistSession(user.id, result, result.username ?? 'instagram')
     if (!saved.ok) {
+      logErr('browser_login persistSession failed')
       await recordRateLimit({ userId: user.id, ipHash, action: 'ig_connect', success: false })
       return NextResponse.json({ ok: false, error: GENERIC_AUTH_ERROR }, { status: 500 })
     }
+    log('browser_login success username=%s user_id=%s', saved.username, saved.user_id)
     await recordRateLimit({ userId: user.id, ipHash, action: 'ig_connect', success: true })
     return NextResponse.json({ ok: true, username: saved.username, user_id: saved.user_id })
   }
@@ -185,8 +194,9 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    console.log('[ig/connect] calling runInstagramCommand login for', username, isCheck ? '(poll)' : '')
+    log('credentials login start username=%s mode=%s', username, isCheck ? 'poll' : 'initial')
     const pendingSettings = await getPendingChallengeSettings(user.id, username)
+    log('pending settings found=%s', Boolean(pendingSettings))
     const result = await runInstagramCommand({
       cmd: 'login',
       username,
@@ -198,12 +208,26 @@ export async function POST(req: NextRequest) {
     if (!result.ok) {
       const failure = result as IgFailure
       // Log full internal detail server-side only
-      console.error('[ig/connect] login failed code=%s internal=%s', failure.code, failure._internalError ?? failure.error)
+      logErr(
+        'login failed mode=%s code=%s challenge=%s method=%s methods=%j internal=%s',
+        isCheck ? 'poll' : 'initial',
+        failure.code,
+        Boolean(failure.challenge_required),
+        failure.verification_method ?? 'n/a',
+        failure.verification_methods ?? [],
+        failure._internalError ?? failure.error,
+      )
       if (!isCheck) {
         await recordRateLimit({ userId: user.id, ipHash, action: 'ig_connect', success: false })
       }
       if (failure.challenge_required) {
         await persistPendingChallenge(user.id, username, failure.pending_settings, failure.verification_methods)
+        log(
+          'challenge persisted username=%s methods=%j has_pending_settings=%s',
+          username,
+          failure.verification_methods ?? [],
+          Boolean(failure.pending_settings),
+        )
         return NextResponse.json({
           ok: false,
           challenge_required: true,
@@ -217,16 +241,19 @@ export async function POST(req: NextRequest) {
     }
 
     if (!result.session) {
+      logErr('login returned ok without session mode=%s', isCheck ? 'poll' : 'initial')
       await recordRateLimit({ userId: user.id, ipHash, action: 'ig_connect', success: false })
       return NextResponse.json({ ok: false, error: GENERIC_AUTH_ERROR }, { status: 500 })
     }
 
     const saved = await persistSession(user.id, result, username)
     if (!saved.ok) {
+      logErr('persistSession failed mode=%s username=%s', isCheck ? 'poll' : 'initial', username)
       await recordRateLimit({ userId: user.id, ipHash, action: 'ig_connect', success: false })
       return NextResponse.json({ ok: false, error: GENERIC_AUTH_ERROR }, { status: 500 })
     }
     await clearPendingChallenge(user.id, username, 'resolved')
+    log('credentials login success mode=%s username=%s ig_user_id=%s', isCheck ? 'poll' : 'initial', saved.username, saved.user_id)
     await recordRateLimit({ userId: user.id, ipHash, action: 'ig_connect', success: true })
     return NextResponse.json({ ok: true, username: saved.username, user_id: saved.user_id })
   } finally {

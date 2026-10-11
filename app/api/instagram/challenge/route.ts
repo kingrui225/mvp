@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { randomUUID } from 'crypto'
 import { requireUser } from '@/lib/auth'
 import { checkRateLimit, clientIp, hashIp, recordRateLimit } from '@/lib/rate-limit'
 import { encrypt, decrypt } from '@/lib/encrypt'
@@ -47,6 +48,9 @@ async function markChallengeState(
 }
 
 export async function POST(req: NextRequest) {
+  const attemptId = randomUUID().slice(0, 8)
+  const log = (msg: string, ...args: unknown[]) => console.log(`[ig/challenge][${attemptId}] ${msg}`, ...args)
+  const logErr = (msg: string, ...args: unknown[]) => console.error(`[ig/challenge][${attemptId}] ${msg}`, ...args)
   const { user, error } = await requireUser()
   if (error) return error
 
@@ -63,6 +67,7 @@ export async function POST(req: NextRequest) {
   if (!username || !password || !code) {
     return NextResponse.json({ error: 'username, password, and code are required' }, { status: 400 })
   }
+  log('start username=%s user=%s code_len=%d', username, user.id, code.length)
 
   const ipHash = hashIp(clientIp(req.headers))
   const limited = await checkRateLimit({ userId: user.id, ipHash, action: 'ig_challenge' })
@@ -72,10 +77,11 @@ export async function POST(req: NextRequest) {
 
   try {
     const pendingSettings = await getPendingChallengeSettings(user.id, username)
+    log('pending settings found=%s', Boolean(pendingSettings))
     const result = await runInstagramCommand({ cmd: 'challenge', username, password, code, pending_settings: pendingSettings })
     if (!result.ok || !result.session) {
       const failure = result as IgFailure
-      console.error('[ig/challenge] failed code=%s internal=%s', failure.code, failure._internalError ?? failure.error)
+      logErr('challenge verify failed code=%s internal=%s', failure.code, failure._internalError ?? failure.error)
       await markChallengeState(user.id, username, 'failed', failure.error)
       await recordRateLimit({ userId: user.id, ipHash, action: 'ig_challenge', success: false })
       return NextResponse.json({ ok: false, error: result.ok ? GENERIC_AUTH_ERROR : failure.error }, { status: 401 })
@@ -94,6 +100,7 @@ export async function POST(req: NextRequest) {
       .single()
 
     if (accountError || !account) {
+      logErr('account insert failed username=%s err=%s', username, accountError?.message ?? 'unknown')
       await recordRateLimit({ userId: user.id, ipHash, action: 'ig_challenge', success: false })
       return NextResponse.json({ ok: false, error: GENERIC_AUTH_ERROR }, { status: 500 })
     }
@@ -106,12 +113,14 @@ export async function POST(req: NextRequest) {
     })
 
     if (sessionError) {
+      logErr('session persist failed username=%s err=%s', username, sessionError.message)
       await markChallengeState(user.id, username, 'failed', 'session_persist_failed')
       await recordRateLimit({ userId: user.id, ipHash, action: 'ig_challenge', success: false })
       return NextResponse.json({ ok: false, error: GENERIC_AUTH_ERROR }, { status: 500 })
     }
 
     await markChallengeState(user.id, username, 'resolved')
+    log('challenge verify success username=%s ig_user_id=%s', result.username ?? username, result.user_id ?? 'n/a')
     await recordRateLimit({ userId: user.id, ipHash, action: 'ig_challenge', success: true })
     return NextResponse.json({
       ok: true,
