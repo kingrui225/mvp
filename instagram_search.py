@@ -1613,12 +1613,13 @@ def rpc_search(payload: dict) -> dict:
             supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
             max_reels = int(os.environ.get("WHISPER_MAX_REELS", "5"))
 
-            video_count = 0
-            for r in results:
-                if video_count >= max_reels:
-                    break
-                if r.get("media_type") != "video":
-                    continue
+            # Transcribe the most-viewed videos (likes as fallback), not just the first N.
+            videos = [r for r in results if r.get("media_type") == "video" and r.get("video_url") and r.get("code")]
+            top = sorted(
+                range(len(videos)),
+                key=lambda i: (-(videos[i].get("view_count") or 0), -(videos[i].get("like_count") or 0), i),
+            )[:max_reels]
+            for r in (videos[i] for i in top):
                 video_url = r.get("video_url")
                 post_code = r.get("code")
                 if not video_url or not post_code:
@@ -1639,8 +1640,6 @@ def rpc_search(payload: dict) -> dict:
                         file=sys.stderr, flush=True,
                     )
                     r["transcript"] = {"text": "", "error": f"{type(exc).__name__}: {exc}"}
-
-                video_count += 1
 
         return {"ok": True, **output, "results": results}
     except SystemExit:
