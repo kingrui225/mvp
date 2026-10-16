@@ -10,6 +10,7 @@ import {
   FileText,
   Film,
   Hash,
+  Info,
   Heart,
   Images,
   LogOut,
@@ -26,9 +27,24 @@ import {
   X,
   Zap,
 } from 'lucide-react'
-import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { ConnectedAccountsModal, type InstagramStatus } from '@/components/connected-accounts-modal'
+import {
+  OFF_BRAND_FIT,
+  SORT_LABELS,
+  countBy,
+  engagementRate,
+  extractHashtags,
+  fitTone,
+  humanLabel,
+  sortPosts,
+  topAlternatives,
+  withinDays,
+  type SortKey,
+} from '@/lib/post-metrics'
+import { rankScore, type PostScore } from '@/lib/jev'
+import { BRAND_BRIEF } from '@/lib/brand-brief'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -71,6 +87,14 @@ interface PostResult {
   transcript?: TranscriptResult
 }
 
+interface ScoreUsage { calls: number; cached: number; inputTokens: number; usd: number; ms: number }
+
+type ScoreStatus =
+  | { state: 'idle' }
+  | { state: 'loading'; n: number }
+  | { state: 'done'; n: number; usage: ScoreUsage }
+  | { state: 'error'; message: string }
+
 interface SearchRecord {
   id: string
   timestamp: string
@@ -90,6 +114,20 @@ const SEARCH_TYPES: { value: SearchType; label: string; icon: typeof Search }[] 
   { value: 'reel', label: 'Reels', icon: Film },
   { value: 'hashtag', label: 'Hashtag', icon: Hash },
   { value: 'place', label: 'Places', icon: MapPin },
+]
+
+const FIT_TONE = {
+  high: 'bg-[#e3f4e8] text-[#1e7a3c]',
+  mid: 'bg-[#fdf1d8] text-[#9a6200]',
+  low: 'bg-[#eef1f5] text-[#8994a1]',
+}
+
+const RECENCY_OPTIONS: { value: number | null; label: string }[] = [
+  { value: null, label: 'Any time' },
+  { value: 1, label: '24h' },
+  { value: 7, label: '7 days' },
+  { value: 30, label: '30 days' },
+  { value: 90, label: '90 days' },
 ]
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -113,6 +151,10 @@ function timeAgo(iso: string): string {
 function truncateCaption(text: string, max = 100): string {
   if (!text) return ''
   return text.length > max ? text.slice(0, max).trimEnd() + '…' : text
+}
+
+function codeScored(posts: PostResult[], scores: Record<string, PostScore>) {
+  return posts.some((p) => p.code && scores[p.code])
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -237,10 +279,90 @@ function TranscriptPanel({ transcript, postCode }: { transcript: TranscriptResul
   )
 }
 
-function PostCard({ post }: { post: PostResult }) {
+const pct = (n: number) => `${Math.round(n * 100)}%`
+
+function Bar({ label, value, sub }: { label: string; value: number; sub?: string }) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="w-24 shrink-0 truncate text-[#5a6675]">{label}</span>
+      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-[#e5e8ec]">
+        <div className="h-full rounded-full bg-[#17202b]" style={{ width: pct(Math.min(1, Math.max(0, value))) }} />
+      </div>
+      <span className="w-16 shrink-0 text-right tabular-nums text-[#17202b]">{sub ?? pct(value)}</span>
+    </div>
+  )
+}
+
+function Pick({ title, id, confidence, answer }: { title: string; id: string; confidence: number; answer: unknown }) {
+  const alts = topAlternatives(answer).filter(([k]) => k !== id).slice(0, 2)
+  return (
+    <div className="space-y-1">
+      <p className="text-[#17202b]">
+        <span className="text-[#8994a1]">{title}: </span>
+        <b>{humanLabel(id)}</b> · {pct(confidence)} confident
+      </p>
+      {alts.map(([k, v]) => <Bar key={k} label={humanLabel(k)} value={v} />)}
+    </div>
+  )
+}
+
+function WhyPanel({ post, score, error }: { post: PostResult; score?: PostScore; error?: string }) {
+  const rank = score ? rankScore(score.fit, post) : null
+  const eng = engagementRate(post)
+  const fb = score?.fitBreakdown
+  const rawBrand = score?.answers?.brand_fit?.score
+  return (
+    <div className="space-y-3 border-t border-[#f0f2f5] bg-[#fafbfc] px-3 py-3 text-[10px] leading-4">
+      {error && <p className="rounded-md bg-[#fff5f5] px-2 py-1.5 text-[#9b2c2c]">Scoring failed: {error}</p>}
+      {!score && !error && <p className="text-[#8994a1]">Not scored yet.</p>}
+      {score && rank && fb && (
+        <>
+          <section className="space-y-1.5">
+            <p className="font-semibold uppercase tracking-wide text-[#8994a1]">Rank = {rank.score.toFixed(2)}</p>
+            <div className="grid grid-cols-3 gap-1.5 text-center">
+              <div className="rounded-md bg-white p-1.5 ring-1 ring-[#e8eaed]">
+                <p className="text-sm font-semibold tabular-nums">{score.fit.toFixed(2)}</p>
+                <p className="text-[#8994a1]">brand fit</p>
+              </div>
+              <div className="rounded-md bg-white p-1.5 ring-1 ring-[#e8eaed]">
+                <p className="text-sm font-semibold tabular-nums">×{(0.5 + 0.5 * rank.recency).toFixed(2)}</p>
+                <p className="text-[#8994a1]">recency {rank.recency.toFixed(2)}{post.taken_at ? '' : ' (unknown)'}</p>
+              </div>
+              <div className="rounded-md bg-white p-1.5 ring-1 ring-[#e8eaed]">
+                <p className="text-sm font-semibold tabular-nums">×{(0.5 + 0.5 * rank.engNorm).toFixed(2)}</p>
+                <p className="text-[#8994a1]">engagement {eng == null ? '(unknown)' : `${(eng * 100).toFixed(1)}%`}</p>
+              </div>
+            </div>
+            <p className="text-[#8994a1]">
+              rank = fit × (0.5 + 0.5·recency) × (0.5 + 0.5·engagement). Recency decays e<sup>−age/30d</sup>; engagement = (likes+comments)/views, capped at 10%; unknown counts as 0.5.
+            </p>
+          </section>
+          <section className="space-y-1">
+            <p className="font-semibold uppercase tracking-wide text-[#8994a1]">Fit = {pct(score.fit)}</p>
+            <Bar label="Brand fit" value={fb.brandFit} sub={rawBrand != null ? `${rawBrand}/3 · ${pct(fb.brandFit)}` : pct(fb.brandFit)} />
+            <Bar label="Audience fit" value={fb.audienceFit} />
+            <Bar label="Junk / off-topic" value={fb.junkPenalty} />
+            <Bar label="Sponsored" value={score.sponsored} sub={`${pct(score.sponsored)} (info)`} />
+            <p className="text-[#8994a1]">fit = brand/3 × (0.5 + 0.5·audience) × (1 − junk). Sponsored is shown, not used in rank.</p>
+          </section>
+          <section className="space-y-2">
+            <Pick title="Topic" id={score.topic} confidence={score.topicConfidence} answer={score.answers?.topic} />
+            <Pick title="Format" id={score.format} confidence={score.formatConfidence} answer={score.answers?.format} />
+            <Pick title="Hook" id={score.hook} confidence={score.hookConfidence} answer={score.answers?.hook} />
+          </section>
+        </>
+      )}
+    </div>
+  )
+}
+
+function PostCard({ post, score, error, onTag }: { post: PostResult; score?: PostScore; error?: string; onTag: (tag: string) => void }) {
+  const [why, setWhy] = useState(false)
   const [imgError, setImgError] = useState(false)
   const href = post.url ?? (post.code ? `https://www.instagram.com/p/${post.code}/` : '#')
   const hasTranscript = Boolean(post.transcript?.text?.trim() || post.transcript?.audio_storage_path)
+  const eng = engagementRate(post)
+  const tags = extractHashtags(post.caption).slice(0, 5)
 
   return (
     <div className="group flex flex-col overflow-hidden rounded-2xl border border-[#e8eaed] bg-white transition hover:-translate-y-0.5 hover:border-[#c8cdd3] hover:shadow-[0_4px_16px_rgba(23,32,43,0.10)]">
@@ -313,6 +435,26 @@ function PostCard({ post }: { post: PostResult }) {
             )}
           </div>
 
+          {eng != null && (
+            <span
+              title="(likes + comments) / views"
+              className="w-fit rounded-md bg-[#eef1f5] px-1.5 py-0.5 text-[10px] font-semibold text-[#475260]"
+            >
+              {(eng * 100).toFixed(1)}% eng
+            </span>
+          )}
+
+          {score && (
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className={`rounded-md px-1.5 py-0.5 text-[10px] font-semibold ${FIT_TONE[fitTone(score.fit)]}`}>
+                Fit {pct(score.fit)}
+              </span>
+              <span className="text-[10px] text-[#8994a1]">
+                {humanLabel(score.topic ?? 'other')} · {humanLabel(score.format ?? 'other')}
+              </span>
+            </div>
+          )}
+
           {/* Username */}
           {post.username && (
             <p className="truncate text-[11px] font-semibold text-[#273442]">
@@ -328,6 +470,36 @@ function PostCard({ post }: { post: PostResult }) {
           )}
         </div>
       </a>
+
+      {/* Hashtag chips — outside the <a> so clicks filter instead of navigating */}
+      {tags.length > 0 && (
+        <div className="flex flex-wrap gap-1 px-3 pb-3">
+          {tags.map((t) => (
+            <button
+              key={t}
+              onClick={() => onTag(t)}
+              className="rounded-md bg-[#f0f2f5] px-1.5 py-0.5 text-[10px] font-medium text-[#5a6675] transition hover:bg-[#e5e8ec] hover:text-[#17202b]"
+            >
+              #{t}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Why? — outside the <a> so clicks don't navigate */}
+      {(score || error) && (
+        <>
+          <button
+            onClick={() => setWhy((v) => !v)}
+            className="flex w-full items-center gap-1.5 border-t border-[#f0f2f5] px-3 py-2 text-left text-[10px] font-semibold text-[#5a6675] transition hover:bg-[#f7f8fa]"
+          >
+            <Info className="size-3 shrink-0 text-[#8b97a5]" />
+            <span className="flex-1">Why this rank?</span>
+            {why ? <ChevronUp className="size-3 text-[#a3acb7]" /> : <ChevronDown className="size-3 text-[#a3acb7]" />}
+          </button>
+          {why && <WhyPanel post={post} score={score} error={error} />}
+        </>
+      )}
 
       {/* Transcript panel — outside the <a> so clicks don't navigate */}
       {hasTranscript && post.transcript && (
@@ -409,6 +581,17 @@ export default function SearchPage() {
   const [igAccount, setIgAccount] = useState<InstagramStatus | null>(null)
   const [accountModalOpen, setAccountModalOpen] = useState(false)
   const [billing, setBilling] = useState<BillingStatus | null>(null)
+  const [sortKey, setSortKey] = useState<SortKey>('relevance')
+  const [recencyDays, setRecencyDays] = useState<number | null>(null)
+  const [activeTag, setActiveTag] = useState<string | null>(null)
+  const [scores, setScores] = useState<Record<string, PostScore>>({})
+  const [scoreErrors, setScoreErrors] = useState<Record<string, string>>({})
+  const [scoreStatus, setScoreStatus] = useState<ScoreStatus>({ state: 'idle' })
+  const [scoreTick, setScoreTick] = useState(0)
+  const [hideOff, setHideOff] = useState(false)
+  const [activeTopic, setActiveTopic] = useState<string | null>(null)
+  const [activeFormat, setActiveFormat] = useState<string | null>(null)
+  const userSorted = useRef(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
   // ── Load history + Instagram status + billing on mount ───────────────────
@@ -538,7 +721,79 @@ export default function SearchPage() {
     })
   }
 
-  const posts = activeRecord?.results ?? []
+  const allPosts = activeRecord?.results ?? []
+  // recency → hashtag → off-brand → topic/format → sort
+  const { posts, hiddenCount, topicCounts, formatCounts } = useMemo(() => {
+    const recent = allPosts.filter((p) => withinDays(p, recencyDays))
+    const tagged = activeTag ? recent.filter((p) => extractHashtags(p.caption).includes(activeTag)) : recent
+    const isOff = (p: PostResult) => (p.code && scores[p.code] ? scores[p.code].fit < OFF_BRAND_FIT : false)
+    const hiddenCount = tagged.filter(isOff).length
+    const visible = hideOff ? tagged.filter((p) => !isOff(p)) : tagged
+    const sc = (p: PostResult) => (p.code ? scores[p.code] : undefined)
+    const faceted = visible.filter(
+      (p) => (!activeTopic || sc(p)?.topic === activeTopic) && (!activeFormat || sc(p)?.format === activeFormat),
+    )
+    return {
+      posts: sortPosts(faceted, sortKey, (p) => {
+        const s = sc(p)
+        return s ? rankScore(s.fit, p).score : null
+      }),
+      hiddenCount,
+      topicCounts: countBy(visible, (p) => sc(p)?.topic),
+      formatCounts: countBy(visible, (p) => sc(p)?.format),
+    }
+  }, [allPosts, recencyDays, activeTag, hideOff, activeTopic, activeFormat, sortKey, scores])
+
+  // New record → drop per-record filters and manual-sort flag (tags/facets rarely carry over).
+  useEffect(() => {
+    setActiveTag(null)
+    setActiveTopic(null)
+    setActiveFormat(null)
+    setSortKey('relevance')
+    userSorted.current = false
+  }, [activeRecord?.id])
+
+  // ── Brand-fit scoring: whenever the active record changes (or Retry) ──────
+  useEffect(() => {
+    const codes = (activeRecord?.results ?? []).filter((p) => p.code)
+    if (codes.length === 0) { setScoreStatus({ state: 'idle' }); return }
+    let stale = false
+    setScoreStatus({ state: 'loading', n: codes.length })
+    const chunks: PostResult[][] = []
+    for (let i = 0; i < codes.length; i += 200) chunks.push(codes.slice(i, i + 200))
+    ;(async () => {
+      const usage: ScoreUsage = { calls: 0, cached: 0, inputTokens: 0, usd: 0, ms: 0 }
+      const t0 = Date.now()
+      let failure: string | null = null
+      await Promise.all(chunks.map(async (posts) => {
+        try {
+          const res = await fetch('/api/score', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ posts }),
+          })
+          const d = await res.json().catch(() => ({}))
+          if (!res.ok) throw new Error(d.error ?? `Scoring failed (${res.status})`)
+          if (stale) return
+          setScores((prev) => ({ ...prev, ...d.scores }))
+          setScoreErrors((prev) => ({ ...prev, ...d.errors }))
+          for (const k of ['calls', 'cached', 'inputTokens', 'usd'] as const) usage[k] += d.usage?.[k] ?? 0
+        } catch (e) {
+          failure = e instanceof Error ? e.message : 'Network error'
+        }
+      }))
+      if (stale) return
+      usage.ms = Date.now() - t0
+      if (failure) setScoreStatus({ state: 'error', message: failure })
+      else {
+        setScoreStatus({ state: 'done', n: codes.length, usage })
+        if (!userSorted.current) setSortKey('fit')
+      }
+    })()
+    return () => { stale = true }
+  }, [activeRecord, scoreTick])
+
+  const scored = scoreStatus.state === 'done' || codeScored(allPosts, scores)
 
   return (
     <div className="flex h-screen overflow-hidden bg-[#f5f6f8] text-[#17202b]">
@@ -815,23 +1070,151 @@ export default function SearchPage() {
                         &ldquo;{activeRecord.query}&rdquo;
                       </h2>
                       <p className="mt-0.5 text-xs text-[#7a8593]">
-                        {posts.length} of {activeRecord.limit} requested ·{' '}
+                        {posts.length} shown of {allPosts.length} ·{' '}
                         {activeRecord.search_type} ·{' '}
                         {timeAgo(activeRecord.timestamp)}
                       </p>
                     </div>
                   </div>
 
-                  {posts.length === 0 ? (
+                  {allPosts.length > 0 && (
+                    <div className="mb-4 flex flex-wrap items-center gap-3 text-xs">
+                      <label className="flex items-center gap-1.5 font-medium text-[#8994a1]">
+                        Sort
+                        <select
+                          value={sortKey}
+                          onChange={(e) => { userSorted.current = true; setSortKey(e.target.value as SortKey) }}
+                          className="cursor-pointer rounded-lg border border-[#d9dfe6] bg-[#f8f9fb] px-2.5 py-1.5 font-semibold text-[#273442] outline-none transition focus:border-[#17202b]"
+                        >
+                          {(Object.keys(SORT_LABELS) as SortKey[]).filter((k) => k !== 'fit' || scored).map((k) => (
+                            <option key={k} value={k}>{SORT_LABELS[k]}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="flex items-center gap-1.5 font-medium text-[#8994a1]">
+                        Posted
+                        <select
+                          value={recencyDays ?? ''}
+                          onChange={(e) => setRecencyDays(e.target.value ? Number(e.target.value) : null)}
+                          className="cursor-pointer rounded-lg border border-[#d9dfe6] bg-[#f8f9fb] px-2.5 py-1.5 font-semibold text-[#273442] outline-none transition focus:border-[#17202b]"
+                        >
+                          {RECENCY_OPTIONS.map((o) => (
+                            <option key={o.label} value={o.value ?? ''}>{o.label}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label
+                        className={`flex items-center gap-1.5 font-medium ${scored ? 'cursor-pointer text-[#273442]' : 'cursor-not-allowed text-[#a3acb7]'}`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={hideOff}
+                          disabled={!scored}
+                          onChange={(e) => setHideOff(e.target.checked)}
+                          className="size-3.5 accent-[#17202b]"
+                        />
+                        Hide off-brand
+                        {scored && hideOff && <span className="text-[#8994a1]">({hiddenCount} hidden)</span>}
+                        {scored && !hideOff && hiddenCount > 0 && <span className="text-[#8994a1]">({hiddenCount} would hide)</span>}
+                      </label>
+                      <span
+                        title={`Scored against: ${BRAND_BRIEF.audience}\nThemes: ${BRAND_BRIEF.themes.join(', ')}\nAvoid: ${BRAND_BRIEF.avoid.join(', ')}`}
+                        className="flex cursor-help items-center gap-1 text-[#8994a1]"
+                      >
+                        <Info className="size-3.5" />
+                        Scoring against: {BRAND_BRIEF.audience.replace(/\.$/, '')}
+                      </span>
+                      {scoreStatus.state === 'loading' && (
+                        <span className="flex items-center gap-1.5 text-[#657180]">
+                          <span className="size-3 animate-spin rounded-full border-2 border-[#d9dfe6] border-t-[#17202b]" />
+                          Scoring brand fit… ({scoreStatus.n} posts)
+                        </span>
+                      )}
+                      {scoreStatus.state === 'done' && (
+                        <span className="text-[#657180]">
+                          Scored {scoreStatus.n} posts · {Math.round(scoreStatus.usage.ms)} ms · ${scoreStatus.usage.usd.toFixed(4)}
+                          {scoreStatus.usage.cached > 0 && ` · ${scoreStatus.usage.cached} cached`}
+                          {Object.keys(scoreErrors).length > 0 && ` · ${Object.keys(scoreErrors).length} failed`}
+                        </span>
+                      )}
+                      {scoreStatus.state === 'error' && (
+                        <span className="flex items-center gap-1.5 rounded-lg bg-[#fff5f5] px-2 py-1 text-[#9b2c2c]">
+                          Scoring failed: {scoreStatus.message}
+                          <button onClick={() => setScoreTick((t) => t + 1)} className="font-semibold underline">Retry</button>
+                        </span>
+                      )}
+                      {activeTag && (
+                        <button
+                          onClick={() => setActiveTag(null)}
+                          title="Clear hashtag filter"
+                          className="flex items-center gap-1 rounded-lg bg-[#17202b] px-2.5 py-1.5 font-semibold text-white transition hover:bg-[#2b3948]"
+                        >
+                          #{activeTag}
+                          <X className="size-3" />
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {scored && (topicCounts.length > 0 || formatCounts.length > 0) && (
+                    <div className="mb-4 space-y-1.5">
+                      {([
+                        ['Topic', topicCounts, activeTopic, setActiveTopic],
+                        ['Format', formatCounts, activeFormat, setActiveFormat],
+                      ] as const).map(([name, counts, active, setActive]) => (
+                        <div key={name} className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                          <span className="w-12 font-medium text-[#8994a1]">{name}</span>
+                          {counts.map(([id, n]) => (
+                            <button
+                              key={id}
+                              onClick={() => setActive(active === id ? null : id)}
+                              className={`rounded-full px-2.5 py-1 font-semibold transition ${
+                                active === id ? 'bg-[#17202b] text-white' : 'bg-[#f0f2f5] text-[#5a6675] hover:bg-[#e5e8ec] hover:text-[#17202b]'
+                              }`}
+                            >
+                              {humanLabel(id)} <span className={active === id ? 'text-white/70' : 'text-[#8994a1]'}>{n}</span>
+                            </button>
+                          ))}
+                          {active && !counts.some(([id]) => id === active) && (
+                            <span className="text-[#8994a1]">{humanLabel(active)} (0 visible)</span>
+                          )}
+                          {active && (
+                            <button onClick={() => setActive(null)} className="flex items-center gap-0.5 text-[#657180] underline">
+                              <X className="size-3" /> clear
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {allPosts.length === 0 ? (
                     <div className="rounded-2xl border border-dashed border-[#d9dfe6] bg-white px-6 py-16 text-center">
                       <Search className="mx-auto mb-3 size-8 text-[#c8cdd3]" />
                       <p className="text-sm font-medium text-[#657180]">No posts found.</p>
                       <p className="mt-1 text-xs text-[#a3acb7]">Try a different query or search type.</p>
                     </div>
+                  ) : posts.length === 0 ? (
+                    <div className="rounded-2xl border border-dashed border-[#d9dfe6] bg-white px-6 py-16 text-center">
+                      <Search className="mx-auto mb-3 size-8 text-[#c8cdd3]" />
+                      <p className="text-sm font-medium text-[#657180]">No posts match these filters.</p>
+                      <button
+                        onClick={() => { setRecencyDays(null); setActiveTag(null); setHideOff(false); setActiveTopic(null); setActiveFormat(null) }}
+                        className="mt-3 rounded-lg bg-[#17202b] px-4 py-2 text-xs font-semibold text-white hover:bg-[#2b3948]"
+                      >
+                        Clear filters
+                      </button>
+                    </div>
                   ) : (
                     <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
                       {posts.map((post, i) => (
-                        <PostCard key={`${activeRecord.id}-${i}`} post={post} />
+                        <PostCard
+                          key={`${activeRecord.id}-${post.pk ?? post.code ?? i}`}
+                          post={post}
+                          score={post.code ? scores[post.code] : undefined}
+                          error={post.code ? scoreErrors[post.code] : undefined}
+                          onTag={setActiveTag}
+                        />
                       ))}
                     </div>
                   )}
